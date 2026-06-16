@@ -8,6 +8,7 @@ export default function QrBox({ qr }: { qr: string | null }) {
 
   // Only the expire timer lives in the effect — no synchronous setState
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!qr) { setExpired(false); return; }
     setExpired(false);
     const t = setTimeout(() => setExpired(true), 29_000);
