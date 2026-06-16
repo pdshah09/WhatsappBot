@@ -10,7 +10,7 @@ const { MongoStore } = pkgMongo;
 import { OptimizedRemoteAuth } from "./OptimizedRemoteAuth.js";
 
 const app = express();
-app.use(cors({ origin: "http://localhost:3000" }));
+app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
 app.use(express.json({ limit: "50mb" }));
 
 const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/whatsapp_bot";
@@ -48,9 +48,9 @@ async function createClient() {
 
 // ── events ─────────────────────────────────────────────
 function bindEvents() {
-  client.on("qr",           (qr)  => { freshAuth = false; push({ type: "qr", qr }, { status: "qr", qr }); });
-  client.on("authenticated", ()   => { freshAuth = true;  push({ type: "authenticated" }, { status: "authenticated" }); });
-  client.on("auth_failure", (msg) => { freshAuth = false; push({ type: "auth_failure", msg }, { status: "disconnected", qr: null }); });
+  client.on("qr",            (qr)  => { freshAuth = false; push({ type: "qr", qr }, { status: "qr", qr }); });
+  client.on("authenticated", ()    => { freshAuth = true;  push({ type: "authenticated" }, { status: "authenticated" }); });
+  client.on("auth_failure",  (msg) => { freshAuth = false; push({ type: "auth_failure", msg }, { status: "disconnected", qr: null }); });
 
   client.on("ready", async () => {
     const connectedAt = new Date().toISOString();
@@ -87,14 +87,21 @@ app.get("/events", (req, res) => {
 // ── REST ───────────────────────────────────────────────
 app.get("/status", (_, res) => res.json(state));
 
-app.post("/connect", (_, res) => {
-  if (state.status === "disconnected") client.initialize();
+app.post("/connect", async (_, res) => {
+  // Guard: only act when truly disconnected — prevents double-initialize
+  if (state.status !== "disconnected") {
+    return res.json({ ok: true, status: state.status });
+  }
+  // Recreate client after a previous logout/destroy
+  await createClient();
+  client.initialize();
   res.json({ ok: true, status: state.status });
 });
 
 app.post("/logout", async (_, res) => {
   await client.logout().catch(() => {});
   await client.destroy().catch(() => {});
+  client = null; // ← mark as dead so /connect recreates it
   Object.assign(state, { status: "disconnected", qr: null, connectedAt: null });
   push({ type: "disconnected" });
   res.json({ ok: true });
@@ -125,7 +132,7 @@ mongoose.connect(mongoUri)
   .then(async () => {
     console.log("Bot → Connected to MongoDB");
     await createClient();
-    client.initialize(); // ← auto-restore session on every server start
+    client.initialize(); // auto-restore session from MongoDB on every server start
     app.listen(3001, () => console.log("Bot → http://localhost:3001"));
   })
   .catch((err) => {
