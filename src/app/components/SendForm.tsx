@@ -74,7 +74,7 @@ export default function SendForm() {
       {/* Phone */}
       <div className="flex flex-col gap-1">
         <label className="text-xs text-white/40">
-          Phone Number <span className="text-white/20">(with country code)</span>
+          Phone Number
         </label>
         <input
           type="tel"
