@@ -13,15 +13,13 @@ export default async function Home() {
     if (res.ok) {
       const { status } = (await res.json()) as { status: string };
 
-      // Already live
+      // Already live — go straight to session
       if (status === "connected") redirect("/session");
 
-      // Chromium is booting or QR is on screen — go wait at /qr
+      // Bot is booting or showing QR
       if (["qr", "authenticated", "initializing"].includes(status)) redirect("/qr");
 
-      // status === "disconnected" — but maybe a saved session exists in MongoDB.
-      // If so, skip /connect and go straight to /qr; the bot will auto-restore
-      // and SSE will push the 'ready' event that advances the page to /session.
+      // Bot is disconnected — check if a saved session exists in MongoDB
       if (status === "disconnected") {
         try {
           const sr = await fetch(`${BOT}/session-exists`, {
@@ -30,12 +28,22 @@ export default async function Home() {
           });
           if (sr.ok) {
             const { exists } = (await sr.json()) as { exists: boolean };
-            if (exists) redirect("/qr");
+            if (exists) {
+              // Kick the bot to start restoring the session in the background,
+              // then send the user to /session which listens via SSE and
+              // will show a loading state until 'ready' fires.
+              await fetch(`${BOT}/connect`, {
+                method: "POST",
+                cache: "no-store",
+                signal: AbortSignal.timeout(2000),
+              }).catch(() => {});
+              redirect("/session");
+            }
           }
         } catch { /* MongoDB query failed — fall through to /connect */ }
       }
     }
-  } catch { /* bot not up yet */ }
+  } catch { /* bot not reachable yet */ }
 
   redirect("/connect");
 }
