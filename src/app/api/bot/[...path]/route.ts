@@ -16,13 +16,16 @@ export async function POST(req: NextRequest, { params }: Context) {
 }
 
 async function proxy(segments: string[], method: string, body?: string) {
+  // /send can carry a base64 attachment — give it 30 s
+  const isSend  = segments.at(-1) === "send";
+  const timeout = isSend ? 30_000 : 5_000;
   try {
     const res = await fetch(`${BOT}/${segments.join("/")}`, {
       method,
       headers: { "Content-Type": "application/json" },
       body,
       cache: "no-store",
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(timeout),
     });
     return new NextResponse(await res.text(), {
       status: res.status,

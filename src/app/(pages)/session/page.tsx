@@ -1,6 +1,6 @@
 // src/app/(pages)/session/page.tsx
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { botLogout } from "@/lib/bot";
 import SessionCard from "@/app/components/SessionCard";
@@ -8,24 +8,41 @@ import SendForm from "@/app/components/SendForm";
 
 export default function SessionPage() {
   const [connectedAt, setConnectedAt] = useState<string | null>(null);
-  const router = useRouter();
+  const router   = useRouter();
+  const esRef    = useRef<EventSource | null>(null);
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const es = new EventSource("/api/bot/events");
+    let retryDelay = 1000;
 
-    es.onmessage = ({ data }) => {
-      const d = JSON.parse(data);
-      // first message: verify still connected
-      if (d.type === "state") {
-        if (d.status !== "connected") { es.close(); router.replace("/connect"); return; }
-        setConnectedAt(d.connectedAt);
-      }
-      if (d.type === "ready")        setConnectedAt(d.connectedAt);
-      if (d.type === "disconnected") { es.close(); router.replace("/connect"); }
+    function connect() {
+      const es = new EventSource("/api/bot/events");
+      esRef.current = es;
+
+      es.onmessage = ({ data }) => {
+        retryDelay = 1000;
+        const d = JSON.parse(data);
+        if (d.type === "state") {
+          if (d.status !== "connected") { es.close(); router.replace("/connect"); return; }
+          setConnectedAt(d.connectedAt);
+        }
+        if (d.type === "ready")        setConnectedAt(d.connectedAt);
+        if (d.type === "disconnected") { es.close(); router.replace("/connect"); }
+      };
+
+      // FIX C2: reconnect with exponential backoff instead of instant redirect
+      es.onerror = () => {
+        es.close();
+        retryDelay = Math.min(retryDelay * 2, 16000);
+        retryRef.current = setTimeout(connect, retryDelay);
+      };
+    }
+
+    connect();
+    return () => {
+      esRef.current?.close();
+      if (retryRef.current) clearTimeout(retryRef.current);
     };
-
-    es.onerror = () => { es.close(); router.replace("/connect"); };
-    return () => es.close();
   }, [router]);
 
   return (
@@ -33,7 +50,11 @@ export default function SessionPage() {
       <div className="w-full max-w-sm flex flex-col gap-4">
         <SessionCard
           connectedAt={connectedAt}
-          onLogout={async () => { await botLogout(); router.replace("/connect"); }}
+          onLogout={async () => {
+            esRef.current?.close();
+            await botLogout();
+            router.replace("/connect");
+          }}
         />
         <SendForm />
       </div>

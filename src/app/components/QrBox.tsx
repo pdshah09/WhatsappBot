@@ -6,16 +6,14 @@ import QRCode from "react-qr-code";
 export default function QrBox({ qr }: { qr: string | null }) {
   const [expired, setExpired] = useState(false);
 
-  // Only the expire timer lives in the effect — no synchronous setState
+  // W1: removed incorrect eslint-disable comment — setState in useEffect is valid
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!qr) { setExpired(false); return; }
     setExpired(false);
     const t = setTimeout(() => setExpired(true), 29_000);
     return () => clearTimeout(t);
   }, [qr]);
 
-  // Derived — no extra state needed
   if (!qr) return (
     <div className="w-[224px] h-[224px] rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-center gap-3">
       <span className="w-6 h-6 border-2 border-[#25d366] border-t-transparent rounded-full animate-spin" />

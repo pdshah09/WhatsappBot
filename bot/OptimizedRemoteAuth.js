@@ -11,48 +11,50 @@ export class OptimizedRemoteAuth extends RemoteAuth {
   }
 
   /**
-   * Override copyByRequiredDirs to filter out locked files and heavy browser cache folders
+   * Override copyByRequiredDirs — skip locked / heavy browser-cache folders
+   * so the ZIP is small and fast to upload.
    */
   async copyByRequiredDirs(from, to) {
     for (const d of this.requiredDirs) {
       const src = path.join(from, d);
-      if (await this.isValidPath(src)) {
-        const dest = path.join(to, path.basename(src));
-        await fsPromises.cp(src, dest, {
+      if (!(await this.isValidPath(src))) continue;
+      const dest = path.join(to, path.basename(src));
+      await fsPromises
+        .cp(src, dest, {
           recursive: true,
           force: true,
           errorOnExist: false,
           filter: (srcPath) => {
             const name = path.basename(srcPath);
-            if (name === 'LOCK' || name === 'LOG' || name === 'LOG.old') return false;
+            if (['LOCK', 'LOG', 'LOG.old'].includes(name)) return false;
             const lp = srcPath.toLowerCase();
-            if (
+            return !(
               lp.includes('cache') ||
               lp.includes('service worker') ||
               lp.includes('blob_storage') ||
               lp.includes('gpucache') ||
               lp.includes('crashpad') ||
               lp.includes('network')
-            ) return false;
-            return true;
+            );
           },
-        }).catch(err => {
-          console.warn(`[OptimizedRemoteAuth] Non-fatal copy warning for ${d}:`, err.message);
-        });
-      }
+        })
+        .catch((err) =>
+          console.warn(`[OptimizedRemoteAuth] Non-fatal copy warning for ${d}:`, err.message)
+        );
     }
   }
 
   /**
-   * Override extractRemoteSession — skip if no MongoDB session exists.
-   * Do NOT delete the MongoDB record if local dir is missing:
-   * on a fresh start .wwebjs_auth won't exist yet, that's normal —
-   * super.extractRemoteSession() will recreate it from MongoDB.
+   * Override extractRemoteSession — skip cleanly when no MongoDB record exists
+   * (fresh install, never saved yet).  Do NOT delete anything.
    */
   async extractRemoteSession() {
     try {
-      const sessionExists = await this.store.sessionExists({ session: this.sessionName });
-      if (!sessionExists) return;
+      const exists = await this.store.sessionExists({ session: this.sessionName });
+      if (!exists) {
+        console.log('[OptimizedRemoteAuth] No saved session found — starting fresh.');
+        return;
+      }
       await super.extractRemoteSession();
     } catch (err) {
       console.warn('[OptimizedRemoteAuth] Session extract skipped:', err.message);
@@ -60,34 +62,45 @@ export class OptimizedRemoteAuth extends RemoteAuth {
   }
 
   /**
-   * Override storeRemoteSession to copy the compressed ZIP to root CWD before saving,
-   * addressing the wwebjs-mongo hardcoded zip location bug.
+   * Override storeRemoteSession.
+   * FIX B3: guard against missing userDataDir; copy ZIP to CWD root first
+   * to work around the wwebjs-mongo hardcoded path bug.
    */
   async storeRemoteSession() {
+    // Guard: dir must exist and be non-empty before we try to compress
     const pathExists = await this.isValidPath(this.userDataDir);
-    if (!pathExists) return;
+    if (!pathExists) {
+      console.warn('[OptimizedRemoteAuth] userDataDir not ready — skipping save.');
+      return;
+    }
 
-    let compressedSessionPath;
     const rootZipPath = `${this.sessionName}.zip`;
+    let compressedSessionPath;
     try {
       compressedSessionPath = await this.compressSession();
+
+      // wwebjs-mongo always reads from CWD/<session>.zip
       if (path.resolve(compressedSessionPath) !== path.resolve(rootZipPath)) {
         await fsPromises.copyFile(compressedSessionPath, rootZipPath);
       }
-      console.log('[OptimizedRemoteAuth] Saving session backup to MongoDB...');
+
+      console.log('[OptimizedRemoteAuth] Uploading session to MongoDB…');
       await this.store.save({ session: this.sessionName });
-      console.log('[OptimizedRemoteAuth] Session backup saved successfully.');
+      console.log('[OptimizedRemoteAuth] Session saved ✓');
     } catch (err) {
       console.error('[OptimizedRemoteAuth] Error saving session:', err);
+      throw err; // re-throw so saveSessionSafe() can retry
     } finally {
-      const paths = [
+      const toRemove = [
         this.tempDir,
         rootZipPath,
         ...(compressedSessionPath ? [compressedSessionPath] : []),
       ];
       await Promise.allSettled(
-        paths.map((p) =>
-          fsPromises.rm(p, { recursive: true, force: true, maxRetries: this.rmMaxRetries }).catch(() => {})
+        toRemove.map((p) =>
+          fsPromises
+            .rm(p, { recursive: true, force: true, maxRetries: this.rmMaxRetries })
+            .catch(() => {})
         )
       );
     }
