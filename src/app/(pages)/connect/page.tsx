@@ -1,6 +1,5 @@
-// connect/connect/page.tsx
+// src/app/(pages)/connect/page.tsx
 "use client";
-
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { botConnect } from "@/lib/bot";
@@ -17,21 +16,18 @@ function WhatsAppLogo() {
 export default function ConnectPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]     = useState<string | null>(null);
 
   const handleConnect = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await botConnect();
+      const res  = await botConnect();
       const data = await res.json();
-      if (!res.ok) {
-        setError(data.error ?? "Bot server not ready yet. Please wait a moment and try again.");
-        return;
-      }
+      if (!res.ok) { setError(data.error ?? "Bot not ready. Try again."); return; }
       router.push("/qr");
     } catch {
-      setError("Cannot reach the bot server. Make sure it is running on port 3001.");
+      setError("Cannot reach the bot server. Make sure it is running.");
     } finally {
       setLoading(false);
     }
@@ -50,11 +46,8 @@ export default function ConnectPage() {
             {error}
           </p>
         )}
-        <button
-          onClick={handleConnect}
-          disabled={loading}
-          className="w-full bg-[#25d366] hover:bg-[#1ebe5d] disabled:opacity-50 disabled:cursor-not-allowed text-black font-semibold py-2.5 rounded-xl transition"
-        >
+        <button onClick={handleConnect} disabled={loading}
+          className="w-full bg-[#25d366] hover:bg-[#1ebe5d] disabled:opacity-50 text-black font-semibold py-2.5 rounded-xl transition">
           {loading ? "Starting..." : "Connect Now"}
         </button>
       </div>

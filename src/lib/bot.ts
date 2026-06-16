@@ -1,9 +1,8 @@
-// lib/bot.ts
+// src/lib/bot.ts
+const BASE = "/api/bot";
 
-export const BOT = process.env.NEXT_PUBLIC_BOT_URL ?? "http://localhost:3001";
-
-export const botConnect = (): Promise<Response> => fetch(`${BOT}/connect`, { method: "POST" });
-export const botLogout  = (): Promise<Response> => fetch(`${BOT}/logout`,  { method: "POST" });
+export const botConnect = () => fetch(`${BASE}/connect`, { method: "POST" });
+export const botLogout  = () => fetch(`${BASE}/logout`,  { method: "POST" });
 
 export async function botSend(phone: string, message: string, attachment?: File) {
   const body: Record<string, unknown> = { phone, message };
@@ -15,7 +14,7 @@ export async function botSend(phone: string, message: string, attachment?: File)
     });
     body.attachment = { data, mimetype: attachment.type, filename: attachment.name };
   }
-  return fetch(`${BOT}/send`, {
+  return fetch(`${BASE}/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
