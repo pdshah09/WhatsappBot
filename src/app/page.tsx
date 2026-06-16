@@ -9,7 +9,7 @@ export default async function Home() {
     );
     if (res.ok) {
       const { status } = await res.json() as { status: string };
-      if (status === "connected")                                    redirect("/session");
+      if (status === "connected") redirect("/session");
       if (["qr", "authenticated", "initializing"].includes(status)) redirect("/qr");
       // status === "disconnected" → fall through to /connect
     }
