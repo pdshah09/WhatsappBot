@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { botGetChats, botGetMessages, type BotChat, type BotMessage } from "@/lib/bot";
 
+interface Props {
+  /** Changing this re-fetches chats (pass activeSession from page) */
+  activeSession: string | null;
+}
+
 function fmt(ts: number) {
   const d = new Date(ts * 1000);
   const now = new Date();
@@ -15,10 +20,26 @@ function fmt(ts: number) {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-function Avatar({ name, isGroup }: { name: string; isGroup: boolean }) {
+function Avatar({ name, isGroup, profilePicUrl }: { name: string; isGroup: boolean; profilePicUrl: string | null }) {
+  const [imgErr, setImgErr] = useState(false);
   const initials = isGroup
     ? "#"
     : name.split(" ").slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
+
+  if (profilePicUrl && !imgErr) {
+    return (
+      <img
+        src={profilePicUrl}
+        alt={name}
+        width={36}
+        height={36}
+        loading="lazy"
+        onError={() => setImgErr(true)}
+        className="w-9 h-9 rounded-full object-cover flex-shrink-0 border border-white/10"
+      />
+    );
+  }
+
   return (
     <div className="w-9 h-9 rounded-full bg-[#25d366]/15 border border-[#25d366]/20 flex items-center justify-center flex-shrink-0">
       <span className="text-[#25d366] text-xs font-semibold">{initials}</span>
@@ -52,20 +73,22 @@ function MessageBubble({ msg }: { msg: BotMessage }) {
   );
 }
 
-export default function ChatPanel() {
-  const [chats, setChats]           = useState<BotChat[]>([]);
-  const [loading, setLoading]       = useState(true);
-  const [error, setError]           = useState<string | null>(null);
-  const [selected, setSelected]     = useState<BotChat | null>(null);
-  const [messages, setMessages]     = useState<BotMessage[]>([]);
+export default function ChatPanel({ activeSession }: Props) {
+  const [chats,       setChats]       = useState<BotChat[]>([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState<string | null>(null);
+  const [selected,    setSelected]    = useState<BotChat | null>(null);
+  const [messages,    setMessages]    = useState<BotMessage[]>([]);
   const [msgsLoading, setMsgsLoading] = useState(false);
-  const [msgsError, setMsgsError]   = useState<string | null>(null);
-  const [search, setSearch]         = useState("");
+  const [msgsError,   setMsgsError]   = useState<string | null>(null);
+  const [search,      setSearch]      = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const loadChats = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setSelected(null);   // clear open thread on reload
+    setMessages([]);
     try {
       const data = await botGetChats();
       setChats(data);
@@ -76,7 +99,10 @@ export default function ChatPanel() {
     }
   }, []);
 
-  useEffect(() => { loadChats(); }, [loadChats]);
+  // Reload chats whenever active session changes
+  useEffect(() => {
+    if (activeSession) loadChats();
+  }, [activeSession, loadChats]);
 
   const openChat = useCallback(async (chat: BotChat) => {
     setSelected(chat);
@@ -93,7 +119,6 @@ export default function ChatPanel() {
     }
   }, []);
 
-  // Scroll to bottom when messages load
   useEffect(() => {
     if (!msgsLoading) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, msgsLoading]);
@@ -150,7 +175,6 @@ export default function ChatPanel() {
       {/* Chat list */}
       {!selected && (
         <>
-          {/* Search */}
           <div className="px-3 py-2 border-b border-white/5">
             <input
               type="text"
@@ -203,7 +227,7 @@ export default function ChatPanel() {
                 onClick={() => openChat(chat)}
                 className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-white/4 transition text-left group"
               >
-                <Avatar name={chat.name} isGroup={chat.isGroup} />
+                <Avatar name={chat.name} isGroup={chat.isGroup} profilePicUrl={chat.profilePicUrl} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-1">
                     <span className="text-sm text-white/80 font-medium truncate group-hover:text-white transition">

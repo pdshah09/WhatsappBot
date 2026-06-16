@@ -19,7 +19,6 @@ const DISCONNECTED: BotState = {
 
 export default function SessionPage() {
   const [botState,        setBotState]        = useState<BotState>(DISCONNECTED);
-  // Incrementing this triggers SessionDropdown to refetch /sessions
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const router   = useRouter();
   const esRef    = useRef<EventSource | null>(null);
@@ -32,7 +31,6 @@ export default function SessionPage() {
       try {
         const d: BotState & { type: string } = JSON.parse(raw);
 
-        // Server signals sessions list changed (ready, disconnect, logout)
         if (d.type === 'sessions_changed') {
           bumpSessions();
           return;
@@ -81,23 +79,16 @@ export default function SessionPage() {
 
   useEffect(() => {
     let retryDelay = 1000;
-
     function connectSSE() {
       const es = new EventSource('/api/bot/events');
       esRef.current = es;
-
-      es.onmessage = ({ data }) => {
-        retryDelay = 1000;
-        applyEvent(data);
-      };
-
+      es.onmessage = ({ data }) => { retryDelay = 1000; applyEvent(data); };
       es.onerror = () => {
         es.close();
         retryDelay = Math.min(retryDelay * 2, 16_000);
         timerRef.current = setTimeout(connectSSE, retryDelay);
       };
     }
-
     connectSSE();
     return () => {
       esRef.current?.close();
@@ -138,7 +129,8 @@ export default function SessionPage() {
       </div>
       <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[380px_1fr] gap-4 h-[calc(100vh-140px)]">
         <SendForm />
-        <ChatPanel />
+        {/* activeSession drives ChatPanel to reload chats on switch */}
+        <ChatPanel activeSession={botState.activeSession} />
       </div>
     </div>
   );

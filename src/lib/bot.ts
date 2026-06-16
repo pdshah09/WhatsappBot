@@ -3,62 +3,49 @@ const BASE = '/api/bot';
 
 async function request<T = unknown>(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  timeoutMs?: number
 ): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
-    cache: 'no-store',
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(text || String(res.status));
-  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+  const controller = timeoutMs ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...options,
+      signal: controller?.signal,
+      headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+      cache: 'no-store',
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || String(res.status));
+    try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
-/** Get current bot state (status, qr, phone, etc.) */
 export function botStatus(): Promise<BotState & { status: string }> {
   return request('/status');
 }
 
-/** List all sessions: saved in MongoDB + running in memory. */
 export function botGetSessions(): Promise<BotSession[]> {
   return request('/sessions');
 }
 
-/**
- * Connect or restore a session.
- * @param sessionId  clientId to restore ("RemoteAuth" | "work"). Omit for new QR.
- * @param label      Optional display name for new sessions.
- */
 export function botConnect(
   sessionId?: string,
   label?: string
 ): Promise<{ ok: boolean; status: string; activeSession: string; isRestore: boolean }> {
-  return request('/connect', {
-    method: 'POST',
-    body: JSON.stringify({ sessionId, label }),
-  });
+  return request('/connect', { method: 'POST', body: JSON.stringify({ sessionId, label }) });
 }
 
-/** Switch active session (must already be running in memory). */
-export function botSwitch(
-  sessionId: string
-): Promise<BotState & { ok: boolean }> {
-  return request('/switch', {
-    method: 'POST',
-    body: JSON.stringify({ sessionId }),
-  });
+export function botSwitch(sessionId: string): Promise<BotState & { ok: boolean }> {
+  return request('/switch', { method: 'POST', body: JSON.stringify({ sessionId }) });
 }
 
-/** Logout + delete session from MongoDB. */
 export function botLogout(sessionId?: string): Promise<{ ok: boolean }> {
-  return request('/logout', {
-    method: 'POST',
-    body: JSON.stringify({ sessionId }),
-  });
+  return request('/logout', { method: 'POST', body: JSON.stringify({ sessionId }) });
 }
 
-/** Send a message from the active session. */
 export async function botSend(
   phone: string,
   message: string,
@@ -76,12 +63,11 @@ export async function botSend(
   return request('/send', { method: 'POST', body: JSON.stringify(body) });
 }
 
-/** Fetch chats for the active session. */
+/** Fetch chats — 2-minute timeout (getChats can be slow on large accounts). */
 export function botGetChats(): Promise<BotChat[]> {
-  return request('/chats');
+  return request('/chats', {}, 120_000);
 }
 
-/** Fetch messages for a chat in the active session. */
 export function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]> {
   return request(`/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`);
 }
@@ -89,41 +75,42 @@ export function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface BotSession {
-  clientId:    string;   // map key: "RemoteAuth" | "work"
-  sessionName: string;   // wwebjs doc id: "RemoteAuth" | "RemoteAuth-work"
-  label:       string;   // display: WA pushname or custom
+  clientId:    string;
+  sessionName: string;
+  label:       string;
   phone:       string | null;
   name:        string | null;
-  status:      string;   // "saved" | "connected" | "initializing" | "qr" | "disconnected"
+  status:      string;
 }
 
 export interface BotState {
-  status:       string;
-  qr:           string | null;
-  connectedAt:  string | null;
+  status:        string;
+  qr:            string | null;
+  connectedAt:   string | null;
   activeSession: string | null;
-  phone:        string | null;
-  name:         string | null;
-  label:        string | null;
+  phone:         string | null;
+  name:          string | null;
+  label:         string | null;
 }
 
 export interface BotChat {
-  id:          string;
-  name:        string;
-  isGroup:     boolean;
-  unreadCount: number;
-  timestamp:   number;
+  id:            string;
+  name:          string;
+  isGroup:       boolean;
+  unreadCount:   number;
+  timestamp:     number;
+  profilePicUrl: string | null;   // ← added
   lastMessage: {
     body: string; fromMe: boolean; timestamp: number; hasMedia: boolean;
   } | null;
 }
 
 export interface BotMessage {
-  id:       string;
-  body:     string;
-  fromMe:   boolean;
-  author:   string | null;
+  id:        string;
+  body:      string;
+  fromMe:    boolean;
+  author:    string | null;
   timestamp: number;
-  hasMedia: boolean;
-  type:     string;
+  hasMedia:  boolean;
+  type:      string;
 }
