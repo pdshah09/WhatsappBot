@@ -1,4 +1,12 @@
 // bot/server.js
+import fs from "fs";
+import path from "path";
+
+// add this function
+function clearBrowserLock() {
+  const lockFile = path.join(process.cwd(), ".wwebjs_auth", "RemoteAuth", "SingletonLock");
+  try { fs.rmSync(lockFile, { force: true }); } catch {}
+}
 import pkg from "whatsapp-web.js";
 const { Client, MessageMedia } = pkg;
 
@@ -53,14 +61,12 @@ function bindEvents() {
   client.on("auth_failure",  (msg) => { freshAuth = false; push({ type: "auth_failure", msg }, { status: "disconnected", qr: null }); });
 
   client.on("ready", async () => {
-    const connectedAt = new Date().toISOString();
-    push({ type: "ready", connectedAt }, { status: "connected", qr: null, connectedAt });
-    if (freshAuth) {
-      freshAuth = false;
-      await client.authStrategy.storeRemoteSession({ emit: false })
-        .catch((err) => console.error("Bot → Session backup failed:", err.message));
-    }
-  });
+  const connectedAt = new Date().toISOString();
+  push({ type: "ready", connectedAt }, { status: "connected", qr: null, connectedAt });
+  // Always backup — idempotent, safe to run every time
+  await client.authStrategy.storeRemoteSession({ emit: false })
+    .catch((err) => console.error("Bot → Session backup failed:", err.message));
+});
 
   client.on("disconnected", () => {
     freshAuth = false;
@@ -94,6 +100,7 @@ app.post("/connect", async (_, res) => {
   }
   // Recreate client after a previous logout/destroy
   await createClient();
+  clearBrowserLock();
   client.initialize();
   res.json({ ok: true, status: state.status });
 });
@@ -132,6 +139,7 @@ mongoose.connect(mongoUri)
   .then(async () => {
     console.log("Bot → Connected to MongoDB");
     await createClient();
+    clearBrowserLock();
     client.initialize(); // auto-restore session from MongoDB on every server start
     app.listen(3001, () => console.log("Bot → http://localhost:3001"));
   })
