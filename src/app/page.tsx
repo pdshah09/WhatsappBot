@@ -45,5 +45,5 @@ export default async function Home() {
     }
   } catch { /* bot not reachable yet */ }
 
-  redirect("/connect");
+  redirect("/session");
 }
