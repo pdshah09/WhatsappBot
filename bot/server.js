@@ -18,7 +18,7 @@ app.use(express.json({ limit: '50mb' }));
 const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
 // ── state ──────────────────────────────────────────────────────────────────
-let state = { status: 'disconnected', qr: null, connectedAt: null };
+let state = { status: 'disconnected', qr: null, connectedAt: null, activeSession: null };
 let sse   = [];
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -54,10 +54,11 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // ── client ─────────────────────────────────────────────────────────────────
 let store, client;
 
-async function createClient() {
+async function createClient(sessionId = 'RemoteAuth') {
   store  = new MongoStore({ mongoose });
   client = new Client({
     authStrategy: new OptimizedRemoteAuth({
+      clientId: sessionId === 'RemoteAuth' ? undefined : sessionId,
       store,
       backupSyncIntervalMs: 120_000,
     }),
@@ -79,24 +80,27 @@ async function createClient() {
       protocolTimeout: 300_000,
     },
   });
-  bindEvents();
+  bindEvents(sessionId);
 }
 
 // ── events ─────────────────────────────────────────────────────────────────
-function bindEvents() {
+function bindEvents(sessionId) {
   client.on('qr',            (qr)  => push({ type: 'qr', qr },           { status: 'qr', qr }));
   client.on('authenticated', ()    => push({ type: 'authenticated' },     { status: 'authenticated' }));
-  client.on('auth_failure',  (msg) => push({ type: 'auth_failure', msg }, { status: 'disconnected', qr: null }));
+  client.on('auth_failure',  (msg) => push({ type: 'auth_failure', msg }, { status: 'disconnected', qr: null, activeSession: null }));
 
   client.on('ready', async () => {
     const connectedAt = new Date().toISOString();
-    push({ type: 'ready', connectedAt }, { status: 'connected', qr: null, connectedAt });
+    push(
+      { type: 'ready', connectedAt, activeSession: sessionId },
+      { status: 'connected', qr: null, connectedAt, activeSession: sessionId }
+    );
     await sleep(4000);
     await saveSessionSafe('ready');
   });
 
   client.on('disconnected', () =>
-    push({ type: 'disconnected' }, { status: 'disconnected', qr: null, connectedAt: null })
+    push({ type: 'disconnected' }, { status: 'disconnected', qr: null, connectedAt: null, activeSession: null })
   );
 }
 
@@ -115,6 +119,30 @@ app.get('/events', (req, res) => {
 // ── REST ───────────────────────────────────────────────────────────────────
 app.get('/status', (_, res) => res.json(state));
 
+/**
+ * GET /sessions
+ * Lists all saved session IDs from MongoDB.
+ * Reads the wwebjs-mongo collection directly.
+ */
+app.get('/sessions', async (_, res) => {
+  try {
+    // wwebjs-mongo stores docs with { id: "RemoteAuth-<clientId>" }
+    // Access via the underlying mongoose model if available, else raw collection
+    const db   = mongoose.connection.db;
+    const docs  = await db.collection('whatsapp-RemoteAuth').find({}, { projection: { _id: 0, id: 1 } }).toArray();
+    const sessions = docs.map((d) => {
+      const raw = d.id ?? '';
+      // Strip "RemoteAuth-" prefix added by wwebjs
+      const id    = raw.replace(/^RemoteAuth-?/, '') || 'default';
+      const label = id === 'default' ? 'Default Session' : id;
+      return { id: raw, label };
+    });
+    res.json(sessions);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/session-exists', async (_, res) => {
   try {
     const s = new MongoStore({ mongoose });
@@ -127,8 +155,6 @@ app.get('/session-exists', async (_, res) => {
 
 /**
  * GET /chats
- * Returns the 30 most recent chats with metadata.
- * Uses client.getChats() from wwebjs — only available when connected.
  */
 app.get('/chats', async (_, res) => {
   if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
@@ -157,8 +183,6 @@ app.get('/chats', async (_, res) => {
 
 /**
  * GET /chats/:id/messages?limit=20
- * Fetches recent messages for a chat.
- * Uses chat.fetchMessages() from wwebjs.
  */
 app.get('/chats/:id/messages', async (req, res) => {
   if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
@@ -181,11 +205,24 @@ app.get('/chats/:id/messages', async (req, res) => {
   }
 });
 
-app.post('/connect', async (_, res) => {
+/**
+ * POST /connect
+ * Body: { sessionId?: string }
+ * sessionId is the raw doc id from /sessions (e.g. "RemoteAuth-work") or
+ * undefined / "new" to start a fresh QR session.
+ */
+app.post('/connect', async (req, res) => {
   if (state.status !== 'disconnected') return res.json({ ok: true, status: state.status });
-  await createClient();
+
+  const rawId     = req.body?.sessionId;
+  // Derive the clientId that OptimizedRemoteAuth expects (strip prefix)
+  const clientId  = rawId && rawId !== 'new'
+    ? rawId.replace(/^RemoteAuth-?/, '') || undefined
+    : undefined;
+
+  await createClient(clientId || 'RemoteAuth');
   clearBrowserLock();
-  Object.assign(state, { status: 'initializing' });
+  Object.assign(state, { status: 'initializing', activeSession: clientId || null });
   client.initialize();
   res.json({ ok: true, status: state.status });
 });
@@ -197,7 +234,7 @@ app.post('/logout', async (_, res) => {
   await client?.logout().catch(() => {});
   await client?.destroy().catch(() => {});
   client = null;
-  Object.assign(state, { status: 'disconnected', qr: null, connectedAt: null });
+  Object.assign(state, { status: 'disconnected', qr: null, connectedAt: null, activeSession: null });
   push({ type: 'disconnected' });
   res.json({ ok: true });
 });

@@ -8,7 +8,8 @@ import SendForm from "@/app/components/SendForm";
 import ChatPanel from "@/app/components/ChatPanel";
 
 export default function SessionPage() {
-  const [connectedAt, setConnectedAt] = useState<string | null>(null);
+  const [connectedAt,   setConnectedAt]   = useState<string | null>(null);
+  const [activeSession, setActiveSession] = useState<string | null>(null);
   const router   = useRouter();
   const esRef    = useRef<EventSource | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -23,11 +24,16 @@ export default function SessionPage() {
       es.onmessage = ({ data }) => {
         retryDelay = 1000;
         const d = JSON.parse(data);
+
         if (d.type === "state") {
           if (d.status !== "connected") { es.close(); router.replace("/connect"); return; }
           setConnectedAt(d.connectedAt);
+          setActiveSession(d.activeSession ?? null);
         }
-        if (d.type === "ready")        setConnectedAt(d.connectedAt);
+        if (d.type === "ready") {
+          setConnectedAt(d.connectedAt);
+          setActiveSession(d.activeSession ?? null);
+        }
         if (d.type === "disconnected") { es.close(); router.replace("/connect"); }
       };
 
@@ -51,6 +57,7 @@ export default function SessionPage() {
       <div className="max-w-6xl mx-auto mb-4">
         <SessionCard
           connectedAt={connectedAt}
+          activeSession={activeSession}
           onLogout={async () => {
             esRef.current?.close();
             await botLogout();
@@ -61,10 +68,7 @@ export default function SessionPage() {
 
       {/* Two-column layout */}
       <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[380px_1fr] gap-4 h-[calc(100vh-140px)]">
-        {/* Left — Send form */}
         <SendForm />
-
-        {/* Right — Chat history */}
         <ChatPanel />
       </div>
     </div>

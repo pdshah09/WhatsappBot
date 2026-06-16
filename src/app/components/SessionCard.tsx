@@ -3,8 +3,24 @@
 import { useEffect, useState } from "react";
 
 interface Props {
-  connectedAt: string | null;
-  onLogout: () => Promise<void>;
+  connectedAt:   string | null;
+  activeSession: string | null;   // raw session id e.g. "RemoteAuth-work"
+  onLogout:      () => Promise<void>;
+}
+
+/** Derive a short human label from the raw session id. */
+function sessionLabel(raw: string | null): string {
+  if (!raw) return "Default";
+  return raw.replace(/^RemoteAuth-?/, "") || "Default";
+}
+
+/** Two-letter initials from a label. */
+function initials(label: string): string {
+  return label
+    .split(/[\s_-]+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "")
+    .join("");
 }
 
 function Uptime({ since }: { since: string }) {
@@ -30,11 +46,13 @@ function Uptime({ since }: { since: string }) {
   return <span>{label}</span>;
 }
 
-export default function SessionCard({ connectedAt, onLogout }: Props) {
+export default function SessionCard({ connectedAt, activeSession, onLogout }: Props) {
   const [loggingOut, setLoggingOut] = useState(false);
-  // W2: surface logout errors in UI
-  const [logoutErr, setLogoutErr]   = useState<string | null>(null);
+  const [logoutErr,  setLogoutErr]  = useState<string | null>(null);
   const isLoading = !connectedAt;
+
+  const label = sessionLabel(activeSession);
+  const chip  = initials(label);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -51,12 +69,28 @@ export default function SessionCard({ connectedAt, onLogout }: Props) {
   return (
     <div className="bg-[#111] border border-[#25d366]/30 rounded-2xl p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between gap-4">
-        {/* Status dot + info */}
+
+        {/* Left — profile chip + status dot + info */}
         <div className="flex items-center gap-3 min-w-0">
+
+          {/* ① Session profile chip (before the green dot) */}
+          <div
+            className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-full pl-1 pr-3 py-1 flex-shrink-0"
+            title={`Session: ${label}`}
+          >
+            <span className="w-6 h-6 rounded-full bg-[#25d366]/20 text-[#25d366] text-[10px] font-bold flex items-center justify-center">
+              {chip}
+            </span>
+            <span className="text-white/60 text-xs font-medium leading-none">{label}</span>
+          </div>
+
+          {/* ② Blinking green dot */}
           <span className="relative flex-shrink-0">
             <span className="w-2.5 h-2.5 rounded-full bg-[#25d366] block" />
             <span className="w-2.5 h-2.5 rounded-full bg-[#25d366] block absolute inset-0 animate-ping opacity-60" />
           </span>
+
+          {/* ③ Connected label + uptime */}
           <div className="min-w-0">
             <p className="text-[#25d366] text-sm font-medium leading-none">Connected</p>
             {isLoading ? (

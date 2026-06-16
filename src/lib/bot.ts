@@ -1,8 +1,15 @@
 // src/lib/bot.ts
 const BASE = "/api/bot";
 
-export const botConnect = () => fetch(`${BASE}/connect`, { method: "POST" });
-export const botLogout  = () => fetch(`${BASE}/logout`,  { method: "POST" });
+/** Start a session. Pass a saved sessionId to restore, omit for a fresh QR. */
+export const botConnect = (sessionId?: string) =>
+  fetch(`${BASE}/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: sessionId ? JSON.stringify({ sessionId }) : undefined,
+  });
+
+export const botLogout = () => fetch(`${BASE}/logout`, { method: "POST" });
 
 export async function botSend(
   phone: string,
@@ -27,6 +34,13 @@ export async function botSend(
   return { ok: res.ok, ...json };
 }
 
+/** List all saved sessions from MongoDB. */
+export async function botGetSessions(): Promise<BotSession[]> {
+  const res = await fetch(`${BASE}/sessions`, { cache: "no-store" });
+  if (!res.ok) return [];
+  return res.json();
+}
+
 export async function botGetChats(): Promise<BotChat[]> {
   const res = await fetch(`${BASE}/chats`, { cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
@@ -40,6 +54,11 @@ export async function botGetMessages(chatId: string, limit = 20): Promise<BotMes
   );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export interface BotSession {
+  id: string;     // raw doc id e.g. "RemoteAuth-work"
+  label: string;  // human-readable e.g. "work"
 }
 
 export interface BotChat {
