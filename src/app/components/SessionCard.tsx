@@ -4,13 +4,15 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { botGetSessions, botSwitch, botConnect, botLogout, type BotSession } from '@/lib/bot';
 
 interface Props {
-  connectedAt:   string | null;
-  activeSession: string | null;
-  phone:         string | null;
-  name:          string | null;
-  label:         string | null;
-  onLogout:      () => Promise<void>;
-  onSwitch:      (clientId: string) => void;
+  connectedAt:     string | null;
+  activeSession:   string | null;
+  phone:           string | null;
+  name:            string | null;
+  label:           string | null;
+  onLogout:        () => Promise<void>;
+  onSwitch:        (clientId: string) => void;
+  /** Incrementing this causes the dropdown to refetch /sessions */
+  sessionsVersion: number;
 }
 
 function initials(label: string): string {
@@ -60,26 +62,30 @@ const TAG: Record<string, string> = {
   disconnected:  'Disconnected',
 };
 
-// ─── Session dropdown ────────────────────────────────────────────────────────
+// ─── Session dropdown ─────────────────────────────────────────────────────────
 function SessionDropdown({
   activeSession,
+  refetchTrigger,
   onClose,
   onSwitchDone,
 }: {
-  activeSession: string | null;
-  onClose:       () => void;
-  onSwitchDone:  (clientId: string) => void;
+  activeSession:  string | null;
+  refetchTrigger: number;
+  onClose:        () => void;
+  onSwitchDone:   (clientId: string) => void;
 }) {
   const [sessions, setSessions] = useState<BotSession[]>([]);
   const [busy,     setBusy]     = useState<string | null>(null);
   const [fetchErr, setFetchErr] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
+  // Refetch whenever dropdown opens OR server signals sessions_changed (via refetchTrigger)
   useEffect(() => {
+    setFetchErr(false);
     botGetSessions()
       .then(setSessions)
       .catch(() => setFetchErr(true));
-  }, []);
+  }, [refetchTrigger]);
 
   useEffect(() => {
     function handler(e: MouseEvent) {
@@ -182,7 +188,7 @@ function SessionDropdown({
         )}
       </div>
 
-      {/* Add new session — goes to /connect, NOT /session */}
+      {/* Add new session — navigates to /connect, no auto-pass to /session */}
       <div className="border-t border-white/5 p-2">
         <a
           href="/connect"
@@ -196,13 +202,21 @@ function SessionDropdown({
   );
 }
 
-// ─── SessionCard ─────────────────────────────────────────────────────────────
+// ─── SessionCard ──────────────────────────────────────────────────────────────
 export default function SessionCard({
-  connectedAt, activeSession, phone, name, label, onLogout, onSwitch,
+  connectedAt, activeSession, phone, name, label,
+  onLogout, onSwitch, sessionsVersion,
 }: Props) {
-  const [loggingOut,   setLoggingOut]   = useState(false);
-  const [logoutErr,    setLogoutErr]    = useState<string | null>(null);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [loggingOut,     setLoggingOut]     = useState(false);
+  const [logoutErr,      setLogoutErr]      = useState<string | null>(null);
+  const [dropdownOpen,   setDropdownOpen]   = useState(false);
+  // Local trigger = max(sessionsVersion bump, open bump)
+  const [refetchTrigger, setRefetchTrigger] = useState(0);
+
+  // Whenever the parent bumps sessionsVersion (SSE sessions_changed), refetch
+  useEffect(() => {
+    setRefetchTrigger((n) => n + 1);
+  }, [sessionsVersion]);
 
   const displayLabel = label || name || activeSession || '—';
   const chip         = initials(displayLabel);
@@ -215,13 +229,20 @@ export default function SessionCard({
     finally { setLoggingOut(false); }
   };
 
+  const handleOpenDropdown = useCallback(() => {
+    setDropdownOpen((v) => {
+      if (!v) setRefetchTrigger((n) => n + 1); // fresh fetch on every open
+      return !v;
+    });
+  }, []);
+
   return (
     <div className="bg-[#111] border border-[#25d366]/25 rounded-2xl px-4 py-3 flex flex-col gap-2">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className="relative">
             <button
-              onClick={() => setDropdownOpen((v) => !v)}
+              onClick={handleOpenDropdown}
               className="flex items-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-[#25d366]/30 rounded-full pl-1 pr-2.5 py-1 transition"
               title="Switch session"
             >
@@ -240,6 +261,7 @@ export default function SessionCard({
             {dropdownOpen && (
               <SessionDropdown
                 activeSession={activeSession}
+                refetchTrigger={refetchTrigger}
                 onClose={() => setDropdownOpen(false)}
                 onSwitchDone={(id) => { onSwitch(id); }}
               />

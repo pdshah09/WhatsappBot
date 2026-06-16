@@ -18,17 +18,26 @@ const DISCONNECTED: BotState = {
 };
 
 export default function SessionPage() {
-  const [botState,  setBotState]  = useState<BotState>(DISCONNECTED);
-  const router  = useRouter();
-  const esRef   = useRef<EventSource | null>(null);
+  const [botState,        setBotState]        = useState<BotState>(DISCONNECTED);
+  // Incrementing this triggers SessionDropdown to refetch /sessions
+  const [sessionsVersion, setSessionsVersion] = useState(0);
+  const router   = useRouter();
+  const esRef    = useRef<EventSource | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const bumpSessions = useCallback(() => setSessionsVersion((n) => n + 1), []);
 
   const applyEvent = useCallback(
     (raw: string) => {
       try {
         const d: BotState & { type: string } = JSON.parse(raw);
 
-        // Full state snapshot
+        // Server signals sessions list changed (ready, disconnect, logout)
+        if (d.type === 'sessions_changed') {
+          bumpSessions();
+          return;
+        }
+
         if (d.type === 'state') {
           if (d.status === 'disconnected' && !d.activeSession) {
             esRef.current?.close();
@@ -39,7 +48,6 @@ export default function SessionPage() {
           return;
         }
 
-        // Incremental patches
         if (d.type === 'ready') {
           setBotState((p) => ({
             ...p,
@@ -50,6 +58,7 @@ export default function SessionPage() {
             name:          d.name   ?? p.name,
             label:         (d as unknown as { label?: string }).label ?? p.label,
           }));
+          bumpSessions();
           return;
         }
 
@@ -58,6 +67,7 @@ export default function SessionPage() {
             esRef.current?.close();
             router.replace('/connect');
           }
+          bumpSessions();
           return;
         }
 
@@ -66,7 +76,7 @@ export default function SessionPage() {
         }
       } catch { /* malformed — ignore */ }
     },
-    [router]
+    [router, bumpSessions]
   );
 
   useEffect(() => {
@@ -102,7 +112,6 @@ export default function SessionPage() {
   };
 
   const handleSwitch = useCallback((newClientId: string) => {
-    // Optimistic: mark loading; SSE 'state' event will supply real data shortly
     setBotState((p) => ({
       ...p,
       activeSession: newClientId,
@@ -124,6 +133,7 @@ export default function SessionPage() {
           label={botState.label}
           onLogout={handleLogout}
           onSwitch={handleSwitch}
+          sessionsVersion={sessionsVersion}
         />
       </div>
       <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[380px_1fr] gap-4 h-[calc(100vh-140px)]">

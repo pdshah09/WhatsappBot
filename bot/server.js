@@ -18,6 +18,8 @@ app.use(express.json({ limit: '50mb' }));
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
 // ─── Session Metadata ─────────────────────────────────────────────────────────
+// SOLE source of truth for which sessions exist.
+// autoRestoreSessions() reads from here on every boot.
 const sessionMetaSchema = new mongoose.Schema({
   clientId:    { type: String, required: true, unique: true },
   label:       { type: String, default: '' },
@@ -38,42 +40,6 @@ function clearBrowserLock(clientId) {
     .forEach((p) => { try { fs.rmSync(p, { force: true }); } catch {} });
 }
 
-/**
- * Discover all saved sessions from wwebjs-mongo GridFS.
- *
- * wwebjs-mongo stores each session as a ZIP in GridFS:
- *   bucket name  : "whatsapp-RemoteAuth"   (configurable via storeName)
- *   collections  : whatsapp-RemoteAuth.files  +  whatsapp-RemoteAuth.chunks
- *   filename     : "RemoteAuth.zip"  (default)  |  "RemoteAuth-work.zip"  (named)
- *
- * NOTE: The screenshot shows collections like whatsapp-RemoteAuth-session-0 etc.
- * Those are legacy / broken attempts. The canonical GridFS bucket is
- * "whatsapp-RemoteAuth" and we read .files to discover valid sessions.
- */
-async function discoverSavedSessions() {
-  const db = mongoose.connection.db;
-  let files = [];
-  try {
-    files = await db
-      .collection('whatsapp-RemoteAuth.files')
-      .find({}, { projection: { _id: 0, filename: 1 } })
-      .toArray();
-  } catch { return []; }
-
-  const clientIds = [];
-  const seen = new Set();
-  for (const f of files) {
-    const fn = f.filename ?? '';
-    // "RemoteAuth.zip"       → clientId "RemoteAuth"
-    // "RemoteAuth-work.zip"  → clientId "work"
-    if (!fn.endsWith('.zip')) continue;
-    const base     = fn.replace(/\.zip$/, '');
-    const clientId = base === 'RemoteAuth' ? 'RemoteAuth' : base.replace(/^RemoteAuth-/, '');
-    if (!seen.has(clientId)) { seen.add(clientId); clientIds.push(clientId); }
-  }
-  return clientIds;
-}
-
 // ─── SSE ──────────────────────────────────────────────────────────────────────
 let sseClients = [];
 
@@ -91,8 +57,8 @@ let   activeClientId = null;
 function makeState(o = {}) {
   return { status: 'disconnected', qr: null, connectedAt: null, phone: null, name: null, label: null, ...o };
 }
-function getActive()      { return activeClientId ? clients.get(activeClientId) : null; }
-function frontendState()  {
+function getActive()     { return activeClientId ? clients.get(activeClientId) : null; }
+function frontendState() {
   const e = getActive();
   return e ? { ...e.state, activeSession: activeClientId } : { ...makeState(), activeSession: activeClientId };
 }
@@ -145,7 +111,12 @@ async function createClient(clientId) {
   });
 
   const meta  = await SessionMeta.findOne({ clientId }).lean();
-  const state = makeState({ status: 'initializing', label: meta?.label || clientId, phone: meta?.phone || null, name: meta?.name || null });
+  const state = makeState({
+    status: 'initializing',
+    label:  meta?.label || clientId,
+    phone:  meta?.phone || null,
+    name:   meta?.name  || null,
+  });
 
   clients.set(clientId, { client, state });
   bindEvents(clientId);
@@ -173,9 +144,9 @@ function bindEvents(clientId) {
   const emit  = (ev) => { if (clientId === activeClientId) broadcast({ ...ev, activeSession: clientId }); };
   const patch = (ch, ev) => { Object.assign(state, ch); emit(ev); };
 
-  client.on('qr',           (qr)  => patch({ status: 'qr', qr },             { type: 'qr', qr }));
-  client.on('authenticated', ()   => patch({ status: 'authenticated' },       { type: 'authenticated' }));
-  client.on('auth_failure',  (msg) => patch({ status: 'disconnected', qr: null }, { type: 'auth_failure', msg }));
+  client.on('qr',            (qr)  => patch({ status: 'qr', qr },                  { type: 'qr', qr }));
+  client.on('authenticated', ()    => patch({ status: 'authenticated' },            { type: 'authenticated' }));
+  client.on('auth_failure',  (msg) => patch({ status: 'disconnected', qr: null },  { type: 'auth_failure', msg }));
 
   client.on('ready', async () => {
     const info        = client.info;
@@ -191,6 +162,8 @@ function bindEvents(clientId) {
     await upsertMeta(clientId, { phone, name, label, connectedAt });
     await sleep(4000);
     await saveSessionSafe(clientId, 'ready');
+    // Tell frontend to refetch sessions list
+    broadcast({ type: 'sessions_changed' });
   });
 
   client.on('disconnected', () => {
@@ -200,14 +173,15 @@ function bindEvents(clientId) {
       activeClientId = clients.size > 0 ? [...clients.keys()][0] : null;
       broadcast({ type: 'state', ...frontendState() });
     }
+    broadcast({ type: 'sessions_changed' });
   });
 }
 
 // ─── SSE endpoint ─────────────────────────────────────────────────────────────
 app.get('/events', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Content-Type',      'text/event-stream');
+  res.setHeader('Cache-Control',     'no-cache');
+  res.setHeader('Connection',        'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   res.write(`data: ${JSON.stringify({ type: 'state', ...frontendState() })}\n\n`);
@@ -215,48 +189,44 @@ app.get('/events', (req, res) => {
   req.on('close', () => { sseClients = sseClients.filter((c) => c.res !== res); });
 });
 
-// ─── REST endpoints ───────────────────────────────────────────────────────────
+// ─── REST ─────────────────────────────────────────────────────────────────────
 
 app.get('/status', (_, res) => res.json(frontendState()));
 
 /**
  * GET /sessions
- * Discovers sessions from GridFS (.files collection), enriches with
- * SessionMeta (display name/phone) and in-memory live state.
+ * Source of truth: sessionmetas collection.
+ * Enriched with live in-memory status.
  */
 app.get('/sessions', async (_, res) => {
   try {
-    const savedClientIds = await discoverSavedSessions();
-    const allMeta        = await SessionMeta.find({}).lean();
-    const metaMap        = Object.fromEntries(allMeta.map((m) => [m.clientId, m]));
+    const allMeta = await SessionMeta.find({}).lean();
+    const result  = [];
+    const seen    = new Set();
 
-    const result = [];
-    const seen   = new Set();
-
-    for (const clientId of savedClientIds) {
+    for (const meta of allMeta) {
+      const { clientId } = meta;
       seen.add(clientId);
-      const meta   = metaMap[clientId];
-      const entry  = clients.get(clientId);
+      const entry = clients.get(clientId);
       result.push({
         clientId,
         sessionName: clientId === 'RemoteAuth' ? 'RemoteAuth' : `RemoteAuth-${clientId}`,
-        label:  entry?.state?.label || meta?.label || clientId,
-        phone:  entry?.state?.phone || meta?.phone || null,
-        name:   entry?.state?.name  || meta?.name  || null,
+        label:  entry?.state?.label || meta.label || clientId,
+        phone:  entry?.state?.phone || meta.phone || null,
+        name:   entry?.state?.name  || meta.name  || null,
         status: entry?.state?.status ?? 'saved',
       });
     }
 
-    // In-memory clients not yet saved (new QR sessions)
+    // In-memory sessions not yet saved (scanning QR for first time)
     for (const [cid, entry] of clients.entries()) {
       if (seen.has(cid)) continue;
-      const meta = metaMap[cid];
       result.push({
         clientId:    cid,
         sessionName: cid === 'RemoteAuth' ? 'RemoteAuth' : `RemoteAuth-${cid}`,
-        label:  entry.state.label || meta?.label || cid,
-        phone:  entry.state.phone || meta?.phone || null,
-        name:   entry.state.name  || meta?.name  || null,
+        label:  entry.state.label || cid,
+        phone:  entry.state.phone || null,
+        name:   entry.state.name  || null,
         status: entry.state.status,
       });
     }
@@ -265,10 +235,7 @@ app.get('/sessions', async (_, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/**
- * POST /connect
- * Body: { sessionId?: string, label?: string }
- */
+/** POST /connect */
 app.post('/connect', async (req, res) => {
   const { sessionId, label } = req.body ?? {};
   const clientId = sessionId || `session-${Date.now()}`;
@@ -320,10 +287,11 @@ app.post('/logout', async (req, res) => {
   } catch {}
 
   broadcast({ type: 'state', ...frontendState() });
+  broadcast({ type: 'sessions_changed' });
   res.json({ ok: true });
 });
 
-/** GET /chats — returns chats WITH profilePicUrl */
+/** GET /chats — with profilePicUrl */
 app.get('/chats', async (_, res) => {
   const entry = getActive();
   if (!entry || entry.state.status !== 'connected')
@@ -332,7 +300,6 @@ app.get('/chats', async (_, res) => {
     const chats = await entry.client.getChats();
     const slice = chats.slice(0, 40);
 
-    // Fetch profile pics in parallel (failures are silently null)
     const pics = await Promise.allSettled(
       slice.map((c) => entry.client.getProfilePicUrl(c.id._serialized))
     );
@@ -389,24 +356,25 @@ app.post('/send', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Boot: auto-restore all saved sessions ───────────────────────────────────
+// ─── Boot: restore all sessions from sessionmetas ─────────────────────────────
 async function autoRestoreSessions() {
-  const savedClientIds = await discoverSavedSessions();
+  const allMeta = await SessionMeta.find({}).lean();
 
-  if (savedClientIds.length === 0) {
+  if (allMeta.length === 0) {
     console.log('Bot → No saved sessions. Waiting for first connect.');
     return;
   }
 
-  console.log(`Bot → Restoring ${savedClientIds.length} session(s):`, savedClientIds);
+  console.log(`Bot → Restoring ${allMeta.length} session(s):`, allMeta.map((m) => m.clientId));
 
-  for (const clientId of savedClientIds) {
-    console.log(`Bot → Initializing [${clientId}]…`);
+  for (const meta of allMeta) {
+    const { clientId } = meta;
+    console.log(`Bot → Initializing [${clientId}] (${meta.name || meta.label || ''})…`);
     await createClient(clientId);
     clearBrowserLock(clientId);
     if (!activeClientId) activeClientId = clientId;
     clients.get(clientId).client.initialize();
-    if (savedClientIds.length > 1) await sleep(3000);
+    if (allMeta.length > 1) await sleep(3000);
   }
 }
 
