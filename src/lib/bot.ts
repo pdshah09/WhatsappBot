@@ -2,7 +2,7 @@
 const BASE = "/api/bot";
 
 export const botConnect = () => fetch(`${BASE}/connect`, { method: "POST" });
-export const botLogout  = () => fetch(`${BASE}/logout",  { method: "POST" });
+export const botLogout  = () => fetch(`${BASE}/logout`,  { method: "POST" });
 
 export async function botSend(
   phone: string,
@@ -34,9 +34,10 @@ export async function botGetChats(): Promise<BotChat[]> {
 }
 
 export async function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]> {
-  const res = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`, {
-    cache: "no-store",
-  });
+  const res = await fetch(
+    `${BASE}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`,
+    { cache: "no-store" }
+  );
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
