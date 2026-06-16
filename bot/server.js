@@ -18,6 +18,8 @@ app.use(express.json({ limit: '50mb' }));
 const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
 // ── state ──────────────────────────────────────────────────────────────────
+// 'initializing' = Chromium is booting / restoring session from MongoDB.
+// The frontend treats this the same as 'qr' (go to /qr, wait for SSE ready).
 let state = { status: 'disconnected', qr: null, connectedAt: null };
 let sse   = [];
 
@@ -30,21 +32,11 @@ function clearBrowserLock() {
 function push(event, patch = {}) {
   Object.assign(state, patch);
   const payload = `data: ${JSON.stringify(event)}\n\n`;
-  // write to all active SSE clients; prune dead ones
   sse = sse.filter((r) => {
     try { r.write(payload); return true; } catch { return false; }
   });
 }
 
-/**
- * FIX B1 + B2:
- * Chromium flushes IndexedDB/LevelDB to disk asynchronously after the
- * 'ready' event fires.  Calling storeRemoteSession() immediately compresses
- * an incomplete snapshot → MongoDB gets 0 bytes or a corrupt ZIP.
- *
- * Solution: wait 4 s for the FS flush, then save.  Also retry once on
- * failure so a transient FS lock doesn't silently drop the backup.
- */
 async function saveSessionSafe(label = '') {
   const tag = label ? `[${label}] ` : '';
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -69,7 +61,6 @@ async function createClient() {
   client = new Client({
     authStrategy: new OptimizedRemoteAuth({
       store,
-      // FIX B2: back up every 2 min instead of 5 — reduces data-loss window
       backupSyncIntervalMs: 120_000,
     }),
     qrMaxRetries: 5,
@@ -102,8 +93,6 @@ function bindEvents() {
   client.on('ready', async () => {
     const connectedAt = new Date().toISOString();
     push({ type: 'ready', connectedAt }, { status: 'connected', qr: null, connectedAt });
-
-    // FIX B1: give Chromium 4 s to fully flush session files before zipping
     await sleep(4000);
     await saveSessionSafe('ready');
   });
@@ -120,7 +109,6 @@ app.get('/events', (req, res) => {
   res.setHeader('Connection',        'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
-  // send current state snapshot immediately
   res.write(`data: ${JSON.stringify({ type: 'state', ...state })}\n\n`);
   sse.push(res);
   req.on('close', () => { sse = sse.filter((r) => r !== res); });
@@ -129,16 +117,33 @@ app.get('/events', (req, res) => {
 // ── REST ───────────────────────────────────────────────────────────────────
 app.get('/status', (_, res) => res.json(state));
 
+/**
+ * GET /session-exists
+ * Queries MongoDB directly — no Chromium needed, responds in <50 ms.
+ * Used by the Next.js root page to decide where to redirect on cold boot
+ * before client.initialize() has finished restoring the session.
+ */
+app.get('/session-exists', async (_, res) => {
+  try {
+    const s = new MongoStore({ mongoose });
+    const exists = await s.sessionExists({ session: 'RemoteAuth' });
+    res.json({ exists: !!exists });
+  } catch {
+    res.json({ exists: false });
+  }
+});
+
 app.post('/connect', async (_, res) => {
   if (state.status !== 'disconnected') return res.json({ ok: true, status: state.status });
   await createClient();
   clearBrowserLock();
-  client.initialize(); // non-blocking — events drive the UI
+  // Mark as initializing immediately so the frontend can route to /qr
+  Object.assign(state, { status: 'initializing' });
+  client.initialize();
   res.json({ ok: true, status: state.status });
 });
 
 app.post('/logout', async (_, res) => {
-  // FIX B4: save current session BEFORE destroying so MongoDB is up to date
   if (client && state.status === 'connected') {
     await saveSessionSafe('logout').catch(() => {});
   }
@@ -176,7 +181,9 @@ mongoose.connect(mongoUri)
     console.log('Bot → Connected to MongoDB');
     await createClient();
     clearBrowserLock();
-    client.initialize(); // will restore session from MongoDB if it exists
+    // Set initializing BEFORE Chromium starts so /status reflects reality
+    Object.assign(state, { status: 'initializing' });
+    client.initialize();
     app.listen(3001, () => console.log('Bot → http://localhost:3001'));
   })
   .catch((err) => {
