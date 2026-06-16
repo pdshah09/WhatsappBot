@@ -33,7 +33,8 @@ const client = new Client({
   }),
   qrMaxRetries: 5,
   puppeteer: {
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    executablePath: process.env.CHROME_PATH
+      || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     headless: true,
     args: [
       '--no-sandbox',
@@ -49,22 +50,36 @@ const client = new Client({
 });
 
 // ── events ─────────────────────────────────────────────
-client.on("qr", (qr) => push({ type: "qr", qr }, { status: "qr", qr }));
-client.on("authenticated", () => push({ type: "authenticated" }, { status: "authenticated" }));
-client.on("auth_failure", (msg) => push({ type: "auth_failure", msg }, { status: "disconnected", qr: null }));
+let freshAuth = false;
+
+client.on("qr", (qr) => { freshAuth = false; push({ type: "qr", qr }, { status: "qr", qr }); });
+client.on("authenticated", () => { freshAuth = true; push({ type: "authenticated" }, { status: "authenticated" }); });
+client.on("auth_failure", (msg) => { freshAuth = false; push({ type: "auth_failure", msg }, { status: "disconnected", qr: null }); });
 
 // client.on("ready", () => {
 //   const connectedAt = new Date().toISOString();
 //   push({ type: "ready", connectedAt }, { status: "connected", qr: null, connectedAt });
 // });
 
-client.on("ready", () => {
+// client.on("ready", () => {
+//   const connectedAt = new Date().toISOString();
+//   client.authStrategy.storeRemoteSession({ emit: false }); // ← add this
+//   push({ type: "ready", connectedAt }, { status: "connected", qr: null, connectedAt });
+// });
+
+// client.on("disconnected", () => push({ type: "disconnected" }, { status: "disconnected", qr: null, connectedAt: null }));
+
+client.on("ready", async () => {
   const connectedAt = new Date().toISOString();
-  client.authStrategy.storeRemoteSession({ emit: false }); // ← add this
   push({ type: "ready", connectedAt }, { status: "connected", qr: null, connectedAt });
+  if (freshAuth) {
+    freshAuth = false;
+    await client.authStrategy.storeRemoteSession({ emit: false })
+      .catch((err) => console.error("Bot → Session backup failed:", err.message));
+  }
 });
 
-client.on("disconnected", () => push({ type: "disconnected" }, { status: "disconnected", qr: null, connectedAt: null }));
+client.on("disconnected", () => { freshAuth = false; push({ type: "disconnected" }, { status: "disconnected", qr: null, connectedAt: null }); });
 
 function push(event, patch = {}) {
   Object.assign(state, patch);
@@ -88,7 +103,7 @@ app.get("/status", (_, res) => res.json(state));
 
 app.post("/connect", (_, res) => {
   if (state.status === "disconnected") client.initialize();
-  res.json({ ok: true });
+  res.json({ ok: true, status: state.status });
 });
 
 app.post("/logout", async (_, res) => {

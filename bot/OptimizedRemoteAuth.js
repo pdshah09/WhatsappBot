@@ -25,7 +25,7 @@ export class OptimizedRemoteAuth extends RemoteAuth {
                     errorOnExist: false,
                     filter: (srcPath) => {
                         const name = path.basename(srcPath);
-                        
+
                         // Exclude leveldb lock and logs that are locked or regenerated on restart
                         if (name === 'LOCK' || name === 'LOG' || name === 'LOG.old') {
                             return false;
@@ -34,9 +34,9 @@ export class OptimizedRemoteAuth extends RemoteAuth {
                         // Exclude heavy browser cache folders (not needed for authentication state)
                         const lowercasePath = srcPath.toLowerCase();
                         if (
-                            lowercasePath.includes('cache') || 
-                            lowercasePath.includes('service worker') || 
-                            lowercasePath.includes('blob_storage') || 
+                            lowercasePath.includes('cache') ||
+                            lowercasePath.includes('service worker') ||
+                            lowercasePath.includes('blob_storage') ||
                             lowercasePath.includes('gpucache') ||
                             lowercasePath.includes('crashpad') ||
                             lowercasePath.includes('network')
@@ -52,6 +52,27 @@ export class OptimizedRemoteAuth extends RemoteAuth {
             }
         }
     }
+    // ── NEW ──────────────────────────────────────────────────────────────────
+    async extractRemoteSession() {
+        try {
+            const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+            if (!sessionExists) return;
+
+            // ── NEW: also verify the local auth dir exists before extracting ──
+            const authDirExists = await this.isValidPath(this.userDataDir);
+            if (!authDirExists) {
+                // stale MongoDB record but no local data — wipe it and start fresh
+                await this.store.delete({ session: this.sessionName }).catch(() => { });
+                console.log("[OptimizedRemoteAuth] Stale session removed from MongoDB. Starting fresh QR flow.");
+                return;
+            }
+
+            await super.extractRemoteSession();
+        } catch (err) {
+            console.warn("[OptimizedRemoteAuth] Session extract skipped:", err.message);
+        }
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     /**
      * Override storeRemoteSession to copy the compressed ZIP to root CWD before saving,
@@ -65,7 +86,7 @@ export class OptimizedRemoteAuth extends RemoteAuth {
         const rootZipPath = `${this.sessionName}.zip`; // Path expected by wwebjs-mongo
         try {
             compressedSessionPath = await this.compressSession();
-            
+
             // If the zip file is not in root directory, copy it there so wwebjs-mongo can find it
             if (path.resolve(compressedSessionPath) !== path.resolve(rootZipPath)) {
                 await fsPromises.copyFile(compressedSessionPath, rootZipPath);
@@ -95,7 +116,7 @@ export class OptimizedRemoteAuth extends RemoteAuth {
                         recursive: true,
                         force: true,
                         maxRetries: this.rmMaxRetries,
-                    }).catch(() => {})
+                    }).catch(() => { })
                 )
             );
         }
