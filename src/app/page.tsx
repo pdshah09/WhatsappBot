@@ -1,5 +1,6 @@
 // src/app/page.tsx
 import { redirect } from "next/navigation";
+import type { BotState } from "@/lib/bot";
 
 const BOT = process.env.BOT_URL ?? "http://localhost:3001";
 
@@ -11,16 +12,16 @@ export default async function Home() {
     });
 
     if (res.ok) {
-      const { status } = (await res.json()) as { status: string };
+      const data = (await res.json()) as BotState & { status: string };
 
-      // Already live — go straight to session
-      if (status === "connected") redirect("/session");
+      // Already live → go to session
+      if (data.status === "connected") redirect("/session");
 
       // Bot is booting or showing QR
-      if (["qr", "authenticated", "initializing"].includes(status)) redirect("/qr");
+      if (["qr", "authenticated", "initializing"].includes(data.status)) redirect("/qr");
 
-      // Bot is disconnected — check if a saved session exists in MongoDB
-      if (status === "disconnected") {
+      // Bot is disconnected — check for saved MongoDB session
+      if (data.status === "disconnected") {
         try {
           const sr = await fetch(`${BOT}/session-exists`, {
             cache: "no-store",
@@ -29,9 +30,7 @@ export default async function Home() {
           if (sr.ok) {
             const { exists } = (await sr.json()) as { exists: boolean };
             if (exists) {
-              // Kick the bot to start restoring the session in the background,
-              // then send the user to /session which listens via SSE and
-              // will show a loading state until 'ready' fires.
+              // Auto-boot and send to /session (SSE will handle loading state)
               await fetch(`${BOT}/connect`, {
                 method: "POST",
                 cache: "no-store",
@@ -40,10 +39,10 @@ export default async function Home() {
               redirect("/session");
             }
           }
-        } catch { /* MongoDB query failed — fall through to /connect */ }
+        } catch { /* MongoDB unavailable — fall through */ }
       }
     }
-  } catch { /* bot not reachable yet */ }
+  } catch { /* bot not reachable */ }
 
-  redirect("/session");
+  redirect("/connect");
 }

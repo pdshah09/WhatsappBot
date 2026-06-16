@@ -9,56 +9,97 @@ import pkgMongo from 'wwebjs-mongo';
 import { OptimizedRemoteAuth } from './OptimizedRemoteAuth.js';
 
 const { Client, MessageMedia } = pkg;
-const { MongoStore } = pkgMongo;
+const { MongoStore }           = pkgMongo;
 
 const app = express();
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
 app.use(express.json({ limit: '50mb' }));
 
-const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
-// ── state ──────────────────────────────────────────────────────────────────
-let state = { status: 'disconnected', qr: null, connectedAt: null, activeSession: null };
-let sse   = [];
+// ─── helpers ────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// ── helpers ────────────────────────────────────────────────────────────────
-function clearBrowserLock() {
-  const lockFile = path.join(process.cwd(), '.wwebjs_auth', 'RemoteAuth', 'SingletonLock');
-  try { fs.rmSync(lockFile, { force: true }); } catch {}
+function clearBrowserLock(clientId) {
+  // lock path differs per clientId when using RemoteAuth
+  const base = path.join(process.cwd(), '.wwebjs_auth');
+  const candidates = [
+    path.join(base, 'RemoteAuth', 'SingletonLock'),
+    path.join(base, `RemoteAuth-${clientId}`, 'SingletonLock'),
+  ];
+  candidates.forEach((p) => { try { fs.rmSync(p, { force: true }); } catch {} });
 }
 
-function push(event, patch = {}) {
-  Object.assign(state, patch);
+// ─── SSE broadcast ──────────────────────────────────────────────────────────
+let sseClients = []; // { res, sessionId: string | null }
+
+function broadcast(event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
-  sse = sse.filter((r) => {
-    try { r.write(payload); return true; } catch { return false; }
+  sseClients = sseClients.filter((c) => {
+    try { c.res.write(payload); return true; } catch { return false; }
   });
 }
 
-async function saveSessionSafe(label = '') {
+// ─── ClientManager ──────────────────────────────────────────────────────────
+// Manages multiple simultaneous WhatsApp clients.
+// state shape: { status, qr, connectedAt, activeSession, phone, name }
+
+const clients = new Map(); // clientId → { client, state }
+
+function makeState(overrides = {}) {
+  return {
+    status: 'disconnected',
+    qr: null,
+    connectedAt: null,
+    activeSession: null,
+    phone: null,
+    name: null,
+    ...overrides,
+  };
+}
+
+// The "active" session the frontend is currently watching
+let activeClientId = null;
+
+function getActive() {
+  return activeClientId ? clients.get(activeClientId) : null;
+}
+
+// Aggregate state for the active session (what the frontend sees)
+function frontendState() {
+  const entry = getActive();
+  if (!entry) return makeState();
+  return { ...entry.state, activeSession: activeClientId };
+}
+
+async function saveSessionSafe(clientId, label = '') {
+  const entry = clients.get(clientId);
+  if (!entry) return;
   const tag = label ? `[${label}] ` : '';
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let i = 1; i <= 2; i++) {
     try {
-      await client.authStrategy.storeRemoteSession();
-      console.log(`Bot → ${tag}Session saved to MongoDB (attempt ${attempt})`);
+      await entry.client.authStrategy.storeRemoteSession();
+      console.log(`Bot → [${clientId}] ${tag}Session saved (attempt ${i})`);
       return;
     } catch (err) {
-      console.error(`Bot → ${tag}Session save attempt ${attempt} failed:`, err.message);
-      if (attempt < 2) await sleep(3000);
+      console.error(`Bot → [${clientId}] ${tag}Save attempt ${i} failed:`, err.message);
+      if (i < 2) await sleep(3000);
     }
   }
 }
 
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+async function createClient(clientId) {
+  // Destroy any existing client for this id
+  if (clients.has(clientId)) {
+    await destroyClient(clientId);
+  }
 
-// ── client ─────────────────────────────────────────────────────────────────
-let store, client;
+  const store  = new MongoStore({ mongoose });
+  const isDefault = clientId === 'RemoteAuth';
 
-async function createClient(sessionId = 'RemoteAuth') {
-  store  = new MongoStore({ mongoose });
-  client = new Client({
+  const client = new Client({
     authStrategy: new OptimizedRemoteAuth({
-      clientId: sessionId === 'RemoteAuth' ? undefined : sessionId,
+      clientId: isDefault ? undefined : clientId,
       store,
       backupSyncIntervalMs: 120_000,
     }),
@@ -69,74 +110,136 @@ async function createClient(sessionId = 'RemoteAuth') {
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
       headless: true,
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas', '--no-first-run',
+        '--no-zygote', '--disable-gpu',
       ],
       protocolTimeout: 300_000,
     },
   });
-  bindEvents(sessionId);
+
+  const state = makeState({ activeSession: clientId });
+  clients.set(clientId, { client, state });
+  bindEvents(clientId);
+  return { client, state };
 }
 
-// ── events ─────────────────────────────────────────────────────────────────
-function bindEvents(sessionId) {
-  client.on('qr',            (qr)  => push({ type: 'qr', qr },           { status: 'qr', qr }));
-  client.on('authenticated', ()    => push({ type: 'authenticated' },     { status: 'authenticated' }));
-  client.on('auth_failure',  (msg) => push({ type: 'auth_failure', msg }, { status: 'disconnected', qr: null, activeSession: null }));
+async function destroyClient(clientId) {
+  const entry = clients.get(clientId);
+  if (!entry) return;
+  try {
+    if (entry.state.status === 'connected') {
+      await saveSessionSafe(clientId, 'destroy');
+    }
+    await entry.client.logout().catch(() => {});
+    await entry.client.destroy().catch(() => {});
+  } catch {}
+  clients.delete(clientId);
+  if (activeClientId === clientId) {
+    activeClientId = clients.size > 0 ? [...clients.keys()][0] : null;
+  }
+}
+
+// ─── events ─────────────────────────────────────────────────────────────────
+function bindEvents(clientId) {
+  const entry = clients.get(clientId);
+  if (!entry) return;
+  const { client, state } = entry;
+
+  const patch = (changes, event) => {
+    Object.assign(state, changes);
+    if (clientId === activeClientId) {
+      broadcast({ ...event, activeSession: clientId });
+    }
+  };
+
+  client.on('qr', (qr) =>
+    patch({ status: 'qr', qr }, { type: 'qr', qr })
+  );
+
+  client.on('authenticated', () =>
+    patch({ status: 'authenticated' }, { type: 'authenticated' })
+  );
+
+  client.on('auth_failure', (msg) =>
+    patch({ status: 'disconnected', qr: null }, { type: 'auth_failure', msg })
+  );
 
   client.on('ready', async () => {
     const connectedAt = new Date().toISOString();
-    push(
-      { type: 'ready', connectedAt, activeSession: sessionId },
-      { status: 'connected', qr: null, connectedAt, activeSession: sessionId }
+    // Grab phone/name from the client's own info if available
+    const info = client.info;
+    const phone = info?.wid?.user ?? null;
+    const name  = info?.pushname ?? null;
+    patch(
+      { status: 'connected', qr: null, connectedAt, phone, name },
+      { type: 'ready', connectedAt, phone, name }
     );
     await sleep(4000);
-    await saveSessionSafe('ready');
+    await saveSessionSafe(clientId, 'ready');
   });
 
-  client.on('disconnected', () =>
-    push({ type: 'disconnected' }, { status: 'disconnected', qr: null, connectedAt: null, activeSession: null })
-  );
+  client.on('disconnected', () => {
+    patch(
+      { status: 'disconnected', qr: null, connectedAt: null, phone: null, name: null },
+      { type: 'disconnected' }
+    );
+    clients.delete(clientId);
+    if (activeClientId === clientId) {
+      activeClientId = clients.size > 0 ? [...clients.keys()][0] : null;
+      // If another session is available, emit its state
+      if (activeClientId) {
+        broadcast({ type: 'state', ...frontendState() });
+      }
+    }
+  });
 }
 
-// ── SSE ────────────────────────────────────────────────────────────────────
+// ─── SSE ────────────────────────────────────────────────────────────────────
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type',      'text/event-stream');
   res.setHeader('Cache-Control',     'no-cache');
   res.setHeader('Connection',        'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
-  res.write(`data: ${JSON.stringify({ type: 'state', ...state })}\n\n`);
-  sse.push(res);
-  req.on('close', () => { sse = sse.filter((r) => r !== res); });
+  // Send current state snapshot immediately
+  res.write(`data: ${JSON.stringify({ type: 'state', ...frontendState() })}\n\n`);
+  sseClients.push({ res });
+  req.on('close', () => { sseClients = sseClients.filter((c) => c.res !== res); });
 });
 
-// ── REST ───────────────────────────────────────────────────────────────────
-app.get('/status', (_, res) => res.json(state));
+// ─── REST ────────────────────────────────────────────────────────────────────
+app.get('/status', (_, res) => res.json(frontendState()));
 
 /**
  * GET /sessions
- * Lists all saved session IDs from MongoDB.
- * Reads the wwebjs-mongo collection directly.
+ * Returns all saved session docs from MongoDB.
+ * wwebjs-mongo stores docs in the collection "whatsapp-RemoteAuth".
+ * Doc shape: { _id, id: "RemoteAuth" | "RemoteAuth-{clientId}" }
  */
 app.get('/sessions', async (_, res) => {
   try {
-    // wwebjs-mongo stores docs with { id: "RemoteAuth-<clientId>" }
-    // Access via the underlying mongoose model if available, else raw collection
     const db   = mongoose.connection.db;
-    const docs  = await db.collection('whatsapp-RemoteAuth').find({}, { projection: { _id: 0, id: 1 } }).toArray();
+    const docs = await db
+      .collection('whatsapp-RemoteAuth')
+      .find({}, { projection: { _id: 0, id: 1 } })
+      .toArray();
+
     const sessions = docs.map((d) => {
-      const raw = d.id ?? '';
-      // Strip "RemoteAuth-" prefix added by wwebjs
-      const id    = raw.replace(/^RemoteAuth-?/, '') || 'default';
-      const label = id === 'default' ? 'Default Session' : id;
-      return { id: raw, label };
+      const raw   = d.id ?? '';
+      const clientId = raw.replace(/^RemoteAuth-?/, '') || 'default';
+      const label    = clientId === 'default' ? 'Default' : clientId;
+      // Is this session currently active/connected?
+      const entry  = clients.get(raw) || clients.get(clientId);
+      const status = entry?.state?.status ?? 'saved';
+      return { id: raw, clientId, label, status };
     });
+    // Also include in-memory clients that may not yet be saved
+    for (const [cid, entry] of clients.entries()) {
+      if (!sessions.find((s) => s.id === cid || s.clientId === cid)) {
+        sessions.push({ id: cid, clientId: cid, label: cid, status: entry.state.status });
+      }
+    }
     res.json(sessions);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -145,7 +248,7 @@ app.get('/sessions', async (_, res) => {
 
 app.get('/session-exists', async (_, res) => {
   try {
-    const s = new MongoStore({ mongoose });
+    const s      = new MongoStore({ mongoose });
     const exists = await s.sessionExists({ session: 'RemoteAuth' });
     res.json({ exists: !!exists });
   } catch {
@@ -154,12 +257,83 @@ app.get('/session-exists', async (_, res) => {
 });
 
 /**
- * GET /chats
+ * POST /connect
+ * Body: { sessionId?: string }  — raw doc id e.g. "RemoteAuth-work" or undefined for new QR
+ * Behaviour:
+ *   1. If sessionId provided → restore existing session, skip QR
+ *   2. If sessionId omitted  → new QR session (clientId = uuid-ish timestamp)
+ *   3. If target session already connected → just switch active, return immediately
+ */
+app.post('/connect', async (req, res) => {
+  const rawId    = req.body?.sessionId;
+  // Derive simple clientId from raw doc id
+  const clientId = rawId
+    ? (rawId.replace(/^RemoteAuth-?/, '') || 'default')
+    : `session-${Date.now()}`;
+
+  // Already connected for this clientId → switch active and return
+  const existing = clients.get(clientId) || clients.get(rawId);
+  if (existing?.state?.status === 'connected') {
+    activeClientId = clientId;
+    broadcast({ type: 'state', ...frontendState() });
+    return res.json({ ok: true, status: 'connected', activeSession: clientId });
+  }
+
+  // If client exists but isn't connected yet → return its current status
+  if (existing && ['initializing', 'qr', 'authenticated'].includes(existing.state.status)) {
+    activeClientId = clientId;
+    return res.json({ ok: true, status: existing.state.status, activeSession: clientId });
+  }
+
+  await createClient(clientId);
+  clearBrowserLock(clientId);
+  activeClientId = clientId;
+  clients.get(clientId).state.status = 'initializing';
+  clients.get(clientId).client.initialize();
+  res.json({ ok: true, status: 'initializing', activeSession: clientId });
+});
+
+/**
+ * POST /switch
+ * Body: { sessionId: string }  — switch active session without destroying others
+ */
+app.post('/switch', (req, res) => {
+  const rawId    = req.body?.sessionId;
+  const clientId = rawId?.replace(/^RemoteAuth-?/, '') || rawId;
+  const entry    = clients.get(clientId);
+  if (!entry) return res.status(404).json({ error: 'Session not found or not running' });
+  activeClientId = clientId;
+  broadcast({ type: 'state', ...frontendState() });
+  res.json({ ok: true, ...frontendState() });
+});
+
+/**
+ * POST /logout
+ * Body: { sessionId?: string }  — logout specific session or active one
+ */
+app.post('/logout', async (req, res) => {
+  const rawId    = req.body?.sessionId;
+  const clientId = rawId
+    ? (rawId.replace(/^RemoteAuth-?/, '') || 'default')
+    : activeClientId;
+
+  if (!clientId) return res.json({ ok: true });
+  await destroyClient(clientId);
+  broadcast({ type: 'disconnected', activeSession: activeClientId });
+  // Send updated state so frontend knows which session is now active
+  broadcast({ type: 'state', ...frontendState() });
+  res.json({ ok: true });
+});
+
+/**
+ * GET /chats — for active session
  */
 app.get('/chats', async (_, res) => {
-  if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
+  const entry = getActive();
+  if (!entry || entry.state.status !== 'connected')
+    return res.status(503).json({ error: 'Not connected' });
   try {
-    const chats = await client.getChats();
+    const chats   = await entry.client.getChats();
     const payload = chats.slice(0, 30).map((c) => ({
       id:          c.id._serialized,
       name:        c.name,
@@ -167,106 +341,66 @@ app.get('/chats', async (_, res) => {
       unreadCount: c.unreadCount,
       timestamp:   c.timestamp,
       lastMessage: c.lastMessage
-        ? {
-            body:      c.lastMessage.body?.slice(0, 60) ?? '',
-            fromMe:    c.lastMessage.fromMe,
-            timestamp: c.lastMessage.timestamp,
-            hasMedia:  c.lastMessage.hasMedia,
-          }
+        ? { body: c.lastMessage.body?.slice(0, 60) ?? '', fromMe: c.lastMessage.fromMe,
+            timestamp: c.lastMessage.timestamp, hasMedia: c.lastMessage.hasMedia }
         : null,
     }));
     res.json(payload);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /**
- * GET /chats/:id/messages?limit=20
+ * GET /chats/:id/messages
  */
 app.get('/chats/:id/messages', async (req, res) => {
-  if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
+  const entry = getActive();
+  if (!entry || entry.state.status !== 'connected')
+    return res.status(503).json({ error: 'Not connected' });
   const limit = Math.min(Number(req.query.limit) || 20, 50);
   try {
-    const chat = await client.getChatById(req.params.id);
-    const msgs = await chat.fetchMessages({ limit });
+    const chat    = await entry.client.getChatById(req.params.id);
+    const msgs    = await chat.fetchMessages({ limit });
     const payload = msgs.map((m) => ({
-      id:        m.id._serialized,
-      body:      m.body,
-      fromMe:    m.fromMe,
-      author:    m.author ?? null,
-      timestamp: m.timestamp,
-      hasMedia:  m.hasMedia,
-      type:      m.type,
+      id: m.id._serialized, body: m.body, fromMe: m.fromMe,
+      author: m.author ?? null, timestamp: m.timestamp, hasMedia: m.hasMedia, type: m.type,
     }));
     res.json(payload);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /**
- * POST /connect
- * Body: { sessionId?: string }
- * sessionId is the raw doc id from /sessions (e.g. "RemoteAuth-work") or
- * undefined / "new" to start a fresh QR session.
+ * POST /send — for active session
  */
-app.post('/connect', async (req, res) => {
-  if (state.status !== 'disconnected') return res.json({ ok: true, status: state.status });
-
-  const rawId     = req.body?.sessionId;
-  // Derive the clientId that OptimizedRemoteAuth expects (strip prefix)
-  const clientId  = rawId && rawId !== 'new'
-    ? rawId.replace(/^RemoteAuth-?/, '') || undefined
-    : undefined;
-
-  await createClient(clientId || 'RemoteAuth');
-  clearBrowserLock();
-  Object.assign(state, { status: 'initializing', activeSession: clientId || null });
-  client.initialize();
-  res.json({ ok: true, status: state.status });
-});
-
-app.post('/logout', async (_, res) => {
-  if (client && state.status === 'connected') {
-    await saveSessionSafe('logout').catch(() => {});
-  }
-  await client?.logout().catch(() => {});
-  await client?.destroy().catch(() => {});
-  client = null;
-  Object.assign(state, { status: 'disconnected', qr: null, connectedAt: null, activeSession: null });
-  push({ type: 'disconnected' });
-  res.json({ ok: true });
-});
-
 app.post('/send', async (req, res) => {
-  if (state.status !== 'connected') return res.status(400).json({ error: 'Not connected' });
+  const entry = getActive();
+  if (!entry || entry.state.status !== 'connected')
+    return res.status(400).json({ error: 'Not connected' });
   const { phone, message, attachment } = req.body;
   if (!phone || !message) return res.status(400).json({ error: 'phone and message required' });
   try {
-    const numberId = await client.getNumberId(phone.replace(/\D/g, ''));
+    const numberId = await entry.client.getNumberId(phone.replace(/\D/g, ''));
     if (!numberId) return res.status(404).json({ error: 'Number not on WhatsApp' });
     const chatId = numberId._serialized;
     if (attachment) {
       const media = new MessageMedia(attachment.mimetype, attachment.data, attachment.filename);
-      await client.sendMessage(chatId, media, { caption: message });
+      await entry.client.sendMessage(chatId, media, { caption: message });
     } else {
-      await client.sendMessage(chatId, message);
+      await entry.client.sendMessage(chatId, message);
     }
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── boot ───────────────────────────────────────────────────────────────────
-mongoose.connect(mongoUri)
+// ─── boot ────────────────────────────────────────────────────────────────────
+mongoose.connect(MONGO_URI)
   .then(async () => {
     console.log('Bot → Connected to MongoDB');
-    await createClient();
-    clearBrowserLock();
-    Object.assign(state, { status: 'initializing' });
-    client.initialize();
+    // Auto-start the default session on boot (existing behaviour preserved)
+    await createClient('RemoteAuth');
+    clearBrowserLock('RemoteAuth');
+    activeClientId = 'RemoteAuth';
+    clients.get('RemoteAuth').state.status = 'initializing';
+    clients.get('RemoteAuth').client.initialize();
     app.listen(3001, () => console.log('Bot → http://localhost:3001'));
   })
   .catch((err) => {
