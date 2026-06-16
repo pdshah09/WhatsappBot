@@ -18,8 +18,6 @@ app.use(express.json({ limit: '50mb' }));
 const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
 // ── state ──────────────────────────────────────────────────────────────────
-// 'initializing' = Chromium is booting / restoring session from MongoDB.
-// The frontend treats this the same as 'qr' (go to /qr, wait for SSE ready).
 let state = { status: 'disconnected', qr: null, connectedAt: null };
 let sse   = [];
 
@@ -117,12 +115,6 @@ app.get('/events', (req, res) => {
 // ── REST ───────────────────────────────────────────────────────────────────
 app.get('/status', (_, res) => res.json(state));
 
-/**
- * GET /session-exists
- * Queries MongoDB directly — no Chromium needed, responds in <50 ms.
- * Used by the Next.js root page to decide where to redirect on cold boot
- * before client.initialize() has finished restoring the session.
- */
 app.get('/session-exists', async (_, res) => {
   try {
     const s = new MongoStore({ mongoose });
@@ -133,11 +125,66 @@ app.get('/session-exists', async (_, res) => {
   }
 });
 
+/**
+ * GET /chats
+ * Returns the 30 most recent chats with metadata.
+ * Uses client.getChats() from wwebjs — only available when connected.
+ */
+app.get('/chats', async (_, res) => {
+  if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
+  try {
+    const chats = await client.getChats();
+    const payload = chats.slice(0, 30).map((c) => ({
+      id:          c.id._serialized,
+      name:        c.name,
+      isGroup:     c.isGroup,
+      unreadCount: c.unreadCount,
+      timestamp:   c.timestamp,
+      lastMessage: c.lastMessage
+        ? {
+            body:      c.lastMessage.body?.slice(0, 60) ?? '',
+            fromMe:    c.lastMessage.fromMe,
+            timestamp: c.lastMessage.timestamp,
+            hasMedia:  c.lastMessage.hasMedia,
+          }
+        : null,
+    }));
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /chats/:id/messages?limit=20
+ * Fetches recent messages for a chat.
+ * Uses chat.fetchMessages() from wwebjs.
+ */
+app.get('/chats/:id/messages', async (req, res) => {
+  if (state.status !== 'connected') return res.status(503).json({ error: 'Not connected' });
+  const limit = Math.min(Number(req.query.limit) || 20, 50);
+  try {
+    const chat = await client.getChatById(req.params.id);
+    const msgs = await chat.fetchMessages({ limit });
+    const payload = msgs.map((m) => ({
+      id:        m.id._serialized,
+      body:      m.body,
+      fromMe:    m.fromMe,
+      author:    m.author ?? null,
+      timestamp: m.timestamp,
+      hasMedia:  m.hasMedia,
+      type:      m.type,
+    }));
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/connect', async (_, res) => {
   if (state.status !== 'disconnected') return res.json({ ok: true, status: state.status });
   await createClient();
   clearBrowserLock();
-  // Mark as initializing immediately so the frontend can route to /qr
   Object.assign(state, { status: 'initializing' });
   client.initialize();
   res.json({ ok: true, status: state.status });
@@ -181,7 +228,6 @@ mongoose.connect(mongoUri)
     console.log('Bot → Connected to MongoDB');
     await createClient();
     clearBrowserLock();
-    // Set initializing BEFORE Chromium starts so /status reflects reality
     Object.assign(state, { status: 'initializing' });
     client.initialize();
     app.listen(3001, () => console.log('Bot → http://localhost:3001'));

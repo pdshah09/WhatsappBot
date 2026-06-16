@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { botLogout } from "@/lib/bot";
 import SessionCard from "@/app/components/SessionCard";
 import SendForm from "@/app/components/SendForm";
+import ChatPanel from "@/app/components/ChatPanel";
 
 export default function SessionPage() {
   const [connectedAt, setConnectedAt] = useState<string | null>(null);
@@ -30,7 +31,6 @@ export default function SessionPage() {
         if (d.type === "disconnected") { es.close(); router.replace("/connect"); }
       };
 
-      // FIX C2: reconnect with exponential backoff instead of instant redirect
       es.onerror = () => {
         es.close();
         retryDelay = Math.min(retryDelay * 2, 16000);
@@ -46,8 +46,9 @@ export default function SessionPage() {
   }, [router]);
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center p-6">
-      <div className="w-full max-w-sm flex flex-col gap-4">
+    <div className="min-h-screen bg-[#0a0a0a] text-white p-4 md:p-6">
+      {/* Top bar — full width */}
+      <div className="max-w-6xl mx-auto mb-4">
         <SessionCard
           connectedAt={connectedAt}
           onLogout={async () => {
@@ -56,7 +57,15 @@ export default function SessionPage() {
             router.replace("/connect");
           }}
         />
+      </div>
+
+      {/* Two-column layout */}
+      <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[380px_1fr] gap-4 h-[calc(100vh-140px)]">
+        {/* Left — Send form */}
         <SendForm />
+
+        {/* Right — Chat history */}
+        <ChatPanel />
       </div>
     </div>
   );

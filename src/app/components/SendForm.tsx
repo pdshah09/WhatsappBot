@@ -31,9 +31,8 @@ export default function SendForm() {
     if (!trimPhone || !message.trim()) return;
     setSending(true);
     try {
-      const res  = await botSend(trimPhone, message.trim(), attachment ?? undefined);
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
+      const data = await botSend(trimPhone, message.trim(), attachment ?? undefined);
+      if (data.ok) {
         notify("Message sent!", true);
         setHistory(h => [
           { phone: trimPhone, preview: message.trim().slice(0, 40), ok: true, at: new Date() },
@@ -41,6 +40,7 @@ export default function SendForm() {
         ]);
         setMessage("");
         setAttachment(null);
+        if (fileRef.current) fileRef.current.value = "";
       } else {
         notify(data.error ?? "Send failed", false);
         setHistory(h => [
@@ -56,11 +56,11 @@ export default function SendForm() {
   };
 
   return (
-    <div className="bg-[#111] border border-white/10 rounded-2xl p-5 flex flex-col gap-4">
+    <div className="bg-[#111] border border-white/10 rounded-2xl p-5 flex flex-col gap-4 h-full">
 
       {/* Toast */}
       {toast && (
-        <div className={`text-sm font-medium px-4 py-2 rounded-lg text-center transition-all ${
+        <div className={`text-sm font-medium px-4 py-2 rounded-lg text-center ${
           toast.ok
             ? "bg-[#25d366]/15 text-[#25d366] border border-[#25d366]/20"
             : "bg-red-500/10 text-red-400 border border-red-500/20"
@@ -78,16 +78,11 @@ export default function SendForm() {
         </label>
         <input
           type="tel"
-          maxLength={10}
-          onInput={
-              (e) => {
-                  e.currentTarget.value = e.currentTarget.value
-                      .replace(/\D/g, '')
-                      .slice(0, 10);
-              }
-          }
           value={phone}
-          onChange={(e) => setPhone(e.target.value.replace(/[^\d+\-\s()]/g, ""))}
+          onInput={(e) => {
+            e.currentTarget.value = e.currentTarget.value.replace(/\D/g, "").slice(0, 15);
+          }}
+          onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 15))}
           placeholder="919876543210"
           className="bg-[#1a1a1a] border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-[#25d366]/50 placeholder:text-white/20"
           required
@@ -100,7 +95,7 @@ export default function SendForm() {
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
-          rows={4}
+          rows={5}
           placeholder="Type your message…"
           className="bg-[#1a1a1a] border border-white/10 rounded-xl px-4 py-2.5 text-sm resize-none focus:outline-none focus:border-[#25d366]/50 placeholder:text-white/20"
         />
@@ -110,18 +105,20 @@ export default function SendForm() {
       {/* Attachment */}
       <div className="flex items-center gap-3">
         <button
+          type="button"
           onClick={() => fileRef.current?.click()}
           className="flex items-center gap-2 text-xs text-white/50 hover:text-white border border-white/10 hover:border-white/30 px-3 py-2 rounded-xl transition"
         >
-          ＋ Attachment
+          + Attachment
         </button>
         {attachment && (
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-xs text-white/40 truncate max-w-[120px]">{attachment.name}</span>
             <button
-              onClick={() => setAttachment(null)}
+              type="button"
+              onClick={() => { setAttachment(null); if (fileRef.current) fileRef.current.value = ""; }}
               className="text-white/20 hover:text-red-400 text-xs transition"
-            >✕</button>
+            >×</button>
           </div>
         )}
         <input
@@ -134,6 +131,7 @@ export default function SendForm() {
 
       {/* Send */}
       <button
+        type="button"
         onClick={send}
         disabled={sending || !phone.replace(/\D/g, "") || !message.trim()}
         className="w-full bg-[#25d366] hover:bg-[#1ebe5d] disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold py-2.5 rounded-xl transition text-sm"
@@ -146,7 +144,7 @@ export default function SendForm() {
         ) : "Send"}
       </button>
 
-      {/* History */}
+      {/* Recent history */}
       {history.length > 0 && (
         <div className="border-t border-white/5 pt-3 flex flex-col gap-2">
           <p className="text-xs text-white/30 uppercase tracking-widest">Recent</p>
