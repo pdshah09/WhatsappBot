@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { botGetSessions, botSwitch, botConnect, botLogout, type BotSession } from '@/lib/bot';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface Props {
   connectedAt:   string | null;
   activeSession: string | null;
@@ -14,7 +13,6 @@ interface Props {
   onSwitch:      (clientId: string) => void;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function initials(label: string): string {
   return label
     .split(/[\s_\-]+/)
@@ -45,46 +43,44 @@ function Uptime({ since }: { since: string }) {
 }
 
 const DOT: Record<string, string> = {
-  connected:    'bg-[#25d366]',
-  initializing: 'bg-amber-400',
-  qr:           'bg-amber-400',
-  authenticated:'bg-amber-400',
-  saved:        'bg-white/20',
-  disconnected: 'bg-white/10',
+  connected:     'bg-[#25d366]',
+  initializing:  'bg-amber-400',
+  qr:            'bg-amber-400',
+  authenticated: 'bg-amber-400',
+  saved:         'bg-white/20',
+  disconnected:  'bg-white/10',
 };
 
 const TAG: Record<string, string> = {
-  connected:    'Connected',
-  initializing: 'Starting…',
-  qr:           'Scan QR',
-  authenticated:'Authenticating…',
-  saved:        'Saved',
-  disconnected: 'Disconnected',
+  connected:     'Connected',
+  initializing:  'Starting…',
+  qr:            'Scan QR',
+  authenticated: 'Authenticating…',
+  saved:         'Saved',
+  disconnected:  'Disconnected',
 };
 
-// ─── SessionDropdown ──────────────────────────────────────────────────────────
+// ─── Session dropdown ────────────────────────────────────────────────────────
 function SessionDropdown({
   activeSession,
   onClose,
   onSwitchDone,
 }: {
   activeSession: string | null;
-  onClose:      () => void;
-  onSwitchDone: (clientId: string) => void;
+  onClose:       () => void;
+  onSwitchDone:  (clientId: string) => void;
 }) {
-  const [sessions,  setSessions]  = useState<BotSession[]>([]);
-  const [busy,      setBusy]      = useState<string | null>(null);
-  const [fetchErr,  setFetchErr]  = useState(false);
+  const [sessions, setSessions] = useState<BotSession[]>([]);
+  const [busy,     setBusy]     = useState<string | null>(null);
+  const [fetchErr, setFetchErr] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Load sessions
   useEffect(() => {
     botGetSessions()
       .then(setSessions)
       .catch(() => setFetchErr(true));
   }, []);
 
-  // Close on outside click
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
@@ -127,24 +123,21 @@ function SessionDropdown({
       ref={panelRef}
       className="absolute top-full left-0 mt-2 z-50 w-64 bg-[#161616] border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
     >
-      {/* Header */}
       <div className="px-4 pt-3 pb-1.5 border-b border-white/5">
         <p className="text-white/30 text-[10px] uppercase tracking-widest">Switch session</p>
       </div>
 
-      {/* Session rows */}
       <div className="flex flex-col py-1 max-h-64 overflow-y-auto">
         {fetchErr ? (
           <p className="text-red-400 text-xs text-center py-4 px-3">Failed to load sessions</p>
-        ) : sessions.length === 0 && !fetchErr ? (
-          /* skeleton */
+        ) : sessions.length === 0 ? (
           <div className="flex flex-col gap-1.5 p-3">
             {[1, 2].map((i) => <div key={i} className="h-10 rounded-xl bg-white/5 animate-pulse" />)}
           </div>
         ) : (
           sessions.map((s) => {
-            const isActive  = s.clientId === activeSession;
-            const isBusy    = busy === s.clientId;
+            const isActive = s.clientId === activeSession;
+            const isBusy   = busy === s.clientId;
             const chip = initials(s.label);
             const dot  = DOT[s.status] ?? 'bg-white/20';
             const tag  = TAG[s.status] ?? s.status;
@@ -157,23 +150,16 @@ function SessionDropdown({
                 }`}
                 onClick={() => handleRow(s)}
               >
-                {/* Avatar */}
                 <span className="w-7 h-7 rounded-full bg-[#25d366]/15 text-[#25d366] text-[10px] font-bold flex items-center justify-center flex-shrink-0">
                   {chip || '?'}
                 </span>
-
-                {/* Info */}
                 <span className="flex-1 min-w-0">
                   <span className="block text-sm text-white/80 truncate leading-tight">{s.label}</span>
                   <span className="block text-[10px] text-white/30 truncate">
                     {s.phone ? `+${s.phone}` : tag}
                   </span>
                 </span>
-
-                {/* Status dot */}
                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dot}`} />
-
-                {/* Spinner / checkmark */}
                 {isBusy ? (
                   <span className="w-3 h-3 border border-white/20 border-t-white/70 rounded-full animate-spin" />
                 ) : isActive ? (
@@ -181,8 +167,6 @@ function SessionDropdown({
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
                 ) : null}
-
-                {/* Per-row logout (hover only) */}
                 {!isActive && !isBusy && (
                   <button
                     title="Logout this session"
@@ -198,21 +182,21 @@ function SessionDropdown({
         )}
       </div>
 
-      {/* Add new */}
+      {/* Add new session — goes to /connect, NOT /session */}
       <div className="border-t border-white/5 p-2">
-        <button
-          onClick={() => { onClose(); window.location.href = '/connect'; }}
+        <a
+          href="/connect"
           className="w-full flex items-center gap-2 px-3 py-2 text-xs text-white/35 hover:text-white hover:bg-white/5 rounded-xl transition"
         >
           <span className="text-base leading-none">+</span>
           Add new session
-        </button>
+        </a>
       </div>
     </div>
   );
 }
 
-// ─── SessionCard ──────────────────────────────────────────────────────────────
+// ─── SessionCard ─────────────────────────────────────────────────────────────
 export default function SessionCard({
   connectedAt, activeSession, phone, name, label, onLogout, onSwitch,
 }: Props) {
@@ -234,11 +218,7 @@ export default function SessionCard({
   return (
     <div className="bg-[#111] border border-[#25d366]/25 rounded-2xl px-4 py-3 flex flex-col gap-2">
       <div className="flex items-center justify-between gap-4">
-
-        {/* Left — profile chip + status */}
         <div className="flex items-center gap-3 min-w-0">
-
-          {/* Profile chip — opens dropdown */}
           <div className="relative">
             <button
               onClick={() => setDropdownOpen((v) => !v)}
@@ -257,7 +237,6 @@ export default function SessionCard({
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-
             {dropdownOpen && (
               <SessionDropdown
                 activeSession={activeSession}
@@ -267,13 +246,11 @@ export default function SessionCard({
             )}
           </div>
 
-          {/* Green pulse dot */}
           <span className="relative flex-shrink-0">
             <span className="w-2.5 h-2.5 rounded-full bg-[#25d366] block" />
             <span className="w-2.5 h-2.5 rounded-full bg-[#25d366] block absolute inset-0 animate-ping opacity-60" />
           </span>
 
-          {/* Status text */}
           <div className="min-w-0">
             <p className="text-[#25d366] text-sm font-medium leading-none">Connected</p>
             {connectedAt ? (
@@ -287,7 +264,6 @@ export default function SessionCard({
           </div>
         </div>
 
-        {/* Logout */}
         <button
           onClick={handleLogout}
           disabled={loggingOut}

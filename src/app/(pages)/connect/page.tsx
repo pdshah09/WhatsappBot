@@ -2,9 +2,9 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { botConnect, botGetSessions, type BotSession } from '@/lib/bot';
+import { botGetSessions, botConnect, botStatus, type BotSession } from '@/lib/bot';
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── helpers ────────────────────────────────────────────────────────────────
 function initials(label: string): string {
   return label
     .split(/[\s_\-]+/)
@@ -14,24 +14,24 @@ function initials(label: string): string {
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  connected:    'bg-[#25d366]',
-  initializing: 'bg-amber-400',
-  qr:           'bg-amber-400',
-  authenticated:'bg-amber-400',
-  saved:        'bg-white/20',
-  disconnected: 'bg-white/10',
+  connected:     'bg-[#25d366]',
+  initializing:  'bg-amber-400',
+  qr:            'bg-amber-400',
+  authenticated: 'bg-amber-400',
+  saved:         'bg-white/20',
+  disconnected:  'bg-white/10',
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  connected:    'Connected',
-  initializing: 'Starting…',
-  qr:           'Scan QR',
-  authenticated:'Authenticated',
-  saved:        'Saved',
-  disconnected: 'Disconnected',
+  connected:     'Connected',
+  initializing:  'Starting…',
+  qr:            'Scan QR',
+  authenticated: 'Authenticated',
+  saved:         'Saved',
+  disconnected:  'Disconnected',
 };
 
-// ─── WhatsApp logo SVG ────────────────────────────────────────────────────────
+// ─── WhatsApp logo ───────────────────────────────────────────────────────────
 function WhatsAppLogo() {
   return (
     <svg viewBox="0 0 48 48" width="48" height="48" fill="none">
@@ -52,7 +52,7 @@ function WhatsAppLogo() {
   );
 }
 
-// ─── Session row ──────────────────────────────────────────────────────────────
+// ─── Session row ─────────────────────────────────────────────────────────────
 function SessionRow({
   session,
   loading,
@@ -78,12 +78,9 @@ function SessionRow({
         text-left group
       "
     >
-      {/* Avatar */}
       <span className="w-9 h-9 rounded-full bg-[#25d366]/15 text-[#25d366] text-xs font-bold flex items-center justify-center flex-shrink-0">
         {chip || '?'}
       </span>
-
-      {/* Info */}
       <span className="flex-1 min-w-0">
         <span className="block text-sm font-medium text-white/90 truncate leading-tight">
           {session.label}
@@ -92,11 +89,7 @@ function SessionRow({
           {session.phone ? `+${session.phone}` : tag}
         </span>
       </span>
-
-      {/* Status dot */}
       <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dot}`} />
-
-      {/* Arrow */}
       <span className="text-white/20 group-hover:text-[#25d366] text-sm transition-colors flex-shrink-0">
         →
       </span>
@@ -104,16 +97,16 @@ function SessionRow({
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+// ─── Page ────────────────────────────────────────────────────────────────────
 export default function ConnectPage() {
   const router = useRouter();
 
   const [sessions, setSessions] = useState<BotSession[]>([]);
   const [fetching, setFetching] = useState(true);
-  const [loading,  setLoading]  = useState<string | null>(null); // clientId being loaded
+  const [loading,  setLoading]  = useState<string | null>(null);
   const [error,    setError]    = useState<string | null>(null);
 
-  // Refresh session list
+  // Load saved sessions (never auto-redirect away from this page)
   const refresh = useCallback(() => {
     setFetching(true);
     botGetSessions()
@@ -124,34 +117,41 @@ export default function ConnectPage() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // ── Handle restore or new connect ──────────────────────────────────────────
-  const handleConnect = async (sessionId?: string) => {
-    const key = sessionId ?? '__new__';
-    setLoading(key);
+  // ── Restore an existing saved session ─────────────────────────────────────
+  const handleRestore = async (sessionId: string) => {
+    setLoading(sessionId);
     setError(null);
     try {
-      const data = await botConnect(sessionId);
-      if (sessionId || data.status === 'connected') {
-        // Restoring an existing session → wait for SSE ready → /session
-        router.push('/session');
-      } else {
-        // New session → show QR
-        router.push('/qr');
-      }
+      await botConnect(sessionId);
+      // Session is being restored → wait for SSE ready on /session
+      router.push('/session');
     } catch (err: unknown) {
-      setError(
-        err instanceof Error ? err.message : 'Cannot reach the bot server. Is it running?'
-      );
+      setError(err instanceof Error ? err.message : 'Cannot reach bot server.');
       setLoading(null);
     }
   };
 
-  // ── Redirect if a session is already connected ──────────────────────────────
-  useEffect(() => {
-    if (sessions.some((s) => s.status === 'connected')) {
-      router.replace('/session');
+  // ── Connect NEW session (always go to /qr, never auto-jump) ───────────────
+  const handleConnectNew = async () => {
+    setLoading('__new__');
+    setError(null);
+    try {
+      // Ask server to spin up a new client; it will emit QR via SSE
+      await botConnect(undefined);
+      router.push('/qr');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Cannot reach bot server.');
+      setLoading(null);
     }
-  }, [sessions, router]);
+  };
+
+  // Check if a session is currently connected so we can show a "Go to session" shortcut
+  const [hasActive, setHasActive] = useState(false);
+  useEffect(() => {
+    botStatus()
+      .then((s) => setHasActive(s.status === 'connected'))
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center p-6">
@@ -164,6 +164,17 @@ export default function ConnectPage() {
           <p className="text-white/35 text-sm mt-1">Link your WhatsApp to get started</p>
         </div>
 
+        {/* "Go to active session" shortcut — only if one is already live */}
+        {hasActive && (
+          <button
+            onClick={() => router.push('/session')}
+            className="w-full flex items-center justify-center gap-2 bg-[#25d366]/10 hover:bg-[#25d366]/20 border border-[#25d366]/25 text-[#25d366] text-sm font-medium py-2.5 rounded-xl transition"
+          >
+            <span className="w-2 h-2 rounded-full bg-[#25d366] animate-pulse" />
+            Go to active session
+          </button>
+        )}
+
         {/* Error */}
         {error && (
           <div className="w-full bg-red-500/10 border border-red-500/25 rounded-xl px-4 py-3">
@@ -174,6 +185,7 @@ export default function ConnectPage() {
         {/* Saved sessions */}
         {fetching ? (
           <div className="w-full flex flex-col gap-2">
+            <div className="h-3 w-24 rounded bg-white/5 animate-pulse mb-1" />
             {[1, 2].map((i) => (
               <div key={i} className="h-[60px] rounded-xl bg-white/5 animate-pulse" />
             ))}
@@ -186,10 +198,9 @@ export default function ConnectPage() {
                 key={s.clientId}
                 session={s}
                 loading={loading !== null}
-                onClick={() => handleConnect(s.clientId)}
+                onClick={() => handleRestore(s.clientId)}
               />
             ))}
-            {/* Divider */}
             <div className="flex items-center gap-3 my-1">
               <div className="flex-1 h-px bg-white/10" />
               <span className="text-white/20 text-[11px]">or</span>
@@ -198,9 +209,9 @@ export default function ConnectPage() {
           </div>
         ) : null}
 
-        {/* Connect new */}
+        {/* Connect NEW — always goes to /qr */}
         <button
-          onClick={() => handleConnect()}
+          onClick={handleConnectNew}
           disabled={loading !== null}
           className="
             w-full flex items-center justify-center gap-2
