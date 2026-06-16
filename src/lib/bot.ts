@@ -1,116 +1,129 @@
 // src/lib/bot.ts
-const BASE = "/api/bot";
+const BASE = '/api/bot';
 
-/** Start or restore a session. Pass sessionId (raw doc id) to restore, omit for new QR. */
-export async function botConnect(sessionId?: string): Promise<Response> {
-  return fetch(`${BASE}/connect`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: sessionId ? JSON.stringify({ sessionId }) : undefined,
+async function request<T = unknown>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    cache: 'no-store',
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || String(res.status));
+  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+}
+
+/** Get current bot state (status, qr, phone, etc.) */
+export function botStatus(): Promise<BotState & { status: string }> {
+  return request('/status');
+}
+
+/** List all sessions: saved in MongoDB + running in memory. */
+export function botGetSessions(): Promise<BotSession[]> {
+  return request('/sessions');
+}
+
+/**
+ * Connect or restore a session.
+ * @param sessionId  clientId to restore ("RemoteAuth" | "work"). Omit for new QR.
+ * @param label      Optional display name for new sessions.
+ */
+export function botConnect(
+  sessionId?: string,
+  label?: string
+): Promise<{ ok: boolean; status: string; activeSession: string; isRestore: boolean }> {
+  return request('/connect', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId, label }),
   });
 }
 
-/** Switch the active session without disconnecting others. */
-export async function botSwitch(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-  const res  = await fetch(`${BASE}/switch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+/** Switch active session (must already be running in memory). */
+export function botSwitch(
+  sessionId: string
+): Promise<BotState & { ok: boolean }> {
+  return request('/switch', {
+    method: 'POST',
     body: JSON.stringify({ sessionId }),
   });
-  return res.json().catch(() => ({ ok: false }));
 }
 
-/** Logout a specific session, or the active one if omitted. */
-export async function botLogout(sessionId?: string): Promise<Response> {
-  return fetch(`${BASE}/logout`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: sessionId ? JSON.stringify({ sessionId }) : undefined,
+/** Logout + delete session from MongoDB. */
+export function botLogout(sessionId?: string): Promise<{ ok: boolean }> {
+  return request('/logout', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
   });
 }
 
+/** Send a message from the active session. */
 export async function botSend(
   phone: string,
   message: string,
   attachment?: File
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean }> {
   const body: Record<string, unknown> = { phone, message };
   if (attachment) {
     const data = await new Promise<string>((resolve) => {
       const r = new FileReader();
-      r.onload = () => resolve((r.result as string).split(",")[1]);
+      r.onload  = () => resolve((r.result as string).split(',')[1]);
       r.readAsDataURL(attachment);
     });
     body.attachment = { data, mimetype: attachment.type, filename: attachment.name };
   }
-  const res = await fetch(`${BASE}/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json().catch(() => ({ ok: false }));
+  return request('/send', { method: 'POST', body: JSON.stringify(body) });
 }
 
-/** List all saved sessions from MongoDB + in-memory running sessions. */
-export async function botGetSessions(): Promise<BotSession[]> {
-  const res = await fetch(`${BASE}/sessions`, { cache: "no-store" });
-  if (!res.ok) return [];
-  return res.json().catch(() => []);
+/** Fetch chats for the active session. */
+export function botGetChats(): Promise<BotChat[]> {
+  return request('/chats');
 }
 
-export async function botGetChats(): Promise<BotChat[]> {
-  const res = await fetch(`${BASE}/chats`, { cache: "no-store" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+/** Fetch messages for a chat in the active session. */
+export function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]> {
+  return request(`/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`);
 }
 
-export async function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]> {
-  const res = await fetch(
-    `${BASE}/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`,
-    { cache: "no-store" }
-  );
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface BotSession {
-  id: string;       // raw doc id: "RemoteAuth" | "RemoteAuth-work"
-  clientId: string; // stripped: "RemoteAuth" | "work"
-  label: string;    // human: "Default" | "work"
-  status: string;   // "saved" | "connected" | "initializing" | "qr" | ...
+  clientId:    string;   // map key: "RemoteAuth" | "work"
+  sessionName: string;   // wwebjs doc id: "RemoteAuth" | "RemoteAuth-work"
+  label:       string;   // display: WA pushname or custom
+  phone:       string | null;
+  name:        string | null;
+  status:      string;   // "saved" | "connected" | "initializing" | "qr" | "disconnected"
 }
 
 export interface BotState {
-  status: string;
-  qr: string | null;
-  connectedAt: string | null;
+  status:       string;
+  qr:           string | null;
+  connectedAt:  string | null;
   activeSession: string | null;
-  phone: string | null;
-  name: string | null;
+  phone:        string | null;
+  name:         string | null;
+  label:        string | null;
 }
 
 export interface BotChat {
-  id: string;
-  name: string;
-  isGroup: boolean;
+  id:          string;
+  name:        string;
+  isGroup:     boolean;
   unreadCount: number;
-  timestamp: number;
+  timestamp:   number;
   lastMessage: {
-    body: string;
-    fromMe: boolean;
-    timestamp: number;
-    hasMedia: boolean;
+    body: string; fromMe: boolean; timestamp: number; hasMedia: boolean;
   } | null;
 }
 
 export interface BotMessage {
-  id: string;
-  body: string;
-  fromMe: boolean;
-  author: string | null;
+  id:       string;
+  body:     string;
+  fromMe:   boolean;
+  author:   string | null;
   timestamp: number;
   hasMedia: boolean;
-  type: string;
+  type:     string;
 }

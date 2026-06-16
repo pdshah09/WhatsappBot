@@ -17,21 +17,33 @@ app.use(express.json({ limit: '50mb' }));
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/whatsapp_bot';
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ─── Session Metadata Schema ──────────────────────────────────────────────────
+// Persists display name + phone across server restarts.
+const sessionMetaSchema = new mongoose.Schema({
+  clientId:    { type: String, required: true, unique: true }, // e.g. "RemoteAuth" | "work"
+  label:       { type: String, default: '' },                  // user-visible name
+  phone:       { type: String, default: null },
+  name:        { type: String, default: null },                // WA pushname
+  connectedAt: { type: String, default: null },
+  createdAt:   { type: Date,   default: Date.now },
+});
+const SessionMeta = mongoose.model('SessionMeta', sessionMetaSchema);
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function clearBrowserLock(clientId) {
-  // lock path differs per clientId when using RemoteAuth
   const base = path.join(process.cwd(), '.wwebjs_auth');
-  const candidates = [
+  const sessionName = clientId === 'RemoteAuth' ? 'RemoteAuth' : `RemoteAuth-${clientId}`;
+  const candidates  = [
+    path.join(base, sessionName, 'SingletonLock'),
     path.join(base, 'RemoteAuth', 'SingletonLock'),
-    path.join(base, `RemoteAuth-${clientId}`, 'SingletonLock'),
   ];
   candidates.forEach((p) => { try { fs.rmSync(p, { force: true }); } catch {} });
 }
 
-// ─── SSE broadcast ──────────────────────────────────────────────────────────
-let sseClients = []; // { res, sessionId: string | null }
+// ─── SSE broadcast ────────────────────────────────────────────────────────────
+let sseClients = [];
 
 function broadcast(event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
@@ -40,66 +52,83 @@ function broadcast(event) {
   });
 }
 
-// ─── ClientManager ──────────────────────────────────────────────────────────
-// Manages multiple simultaneous WhatsApp clients.
-// state shape: { status, qr, connectedAt, activeSession, phone, name }
+// ─── ClientManager ────────────────────────────────────────────────────────────
+//
+// Key invariant: Map key is ALWAYS the raw wwebjs clientId string:
+//   default session  → "RemoteAuth"
+//   named sessions   → "work", "personal", etc. (NOT "RemoteAuth-work")
+//
+// wwebjs internally converts clientId → sessionName:
+//   clientId = undefined  → sessionName = "RemoteAuth"
+//   clientId = "work"     → sessionName = "RemoteAuth-work"
+//
+// The MongoDB wwebjs-mongo collection stores docs with id = sessionName.
 
 const clients = new Map(); // clientId → { client, state }
+let   activeClientId = null;
 
 function makeState(overrides = {}) {
   return {
-    status: 'disconnected',
-    qr: null,
+    status:      'disconnected',
+    qr:          null,
     connectedAt: null,
-    activeSession: null,
-    phone: null,
-    name: null,
+    phone:       null,
+    name:        null,
+    label:       null,
     ...overrides,
   };
 }
-
-// The "active" session the frontend is currently watching
-let activeClientId = null;
 
 function getActive() {
   return activeClientId ? clients.get(activeClientId) : null;
 }
 
-// Aggregate state for the active session (what the frontend sees)
 function frontendState() {
   const entry = getActive();
-  if (!entry) return makeState();
+  if (!entry) return { ...makeState(), activeSession: activeClientId };
   return { ...entry.state, activeSession: activeClientId };
 }
 
-async function saveSessionSafe(clientId, label = '') {
+// Persist name/phone/label to MongoDB so they survive restarts
+async function upsertMeta(clientId, fields) {
+  try {
+    await SessionMeta.findOneAndUpdate(
+      { clientId },
+      { $set: fields },
+      { upsert: true, new: true }
+    );
+  } catch (err) {
+    console.warn(`[meta] upsert failed for ${clientId}:`, err.message);
+  }
+}
+
+async function saveSessionSafe(clientId, tag = '') {
   const entry = clients.get(clientId);
   if (!entry) return;
-  const tag = label ? `[${label}] ` : '';
   for (let i = 1; i <= 2; i++) {
     try {
       await entry.client.authStrategy.storeRemoteSession();
-      console.log(`Bot → [${clientId}] ${tag}Session saved (attempt ${i})`);
+      console.log(`[${clientId}] ${tag} session saved (attempt ${i})`);
       return;
     } catch (err) {
-      console.error(`Bot → [${clientId}] ${tag}Save attempt ${i} failed:`, err.message);
+      console.error(`[${clientId}] ${tag} save attempt ${i} failed:`, err.message);
       if (i < 2) await sleep(3000);
     }
   }
 }
 
+// ─── createClient ─────────────────────────────────────────────────────────────
 async function createClient(clientId) {
-  // Destroy any existing client for this id
-  if (clients.has(clientId)) {
-    await destroyClient(clientId);
-  }
+  if (clients.has(clientId)) await destroyClient(clientId);
 
-  const store  = new MongoStore({ mongoose });
-  const isDefault = clientId === 'RemoteAuth';
+  const store = new MongoStore({ mongoose });
+
+  // wwebjs rule: default session passes clientId=undefined; named passes the string
+  const wwjsClientId = clientId === 'RemoteAuth' ? undefined : clientId;
 
   const client = new Client({
     authStrategy: new OptimizedRemoteAuth({
-      clientId: isDefault ? undefined : clientId,
+      clientId: wwjsClientId,
       store,
       backupSyncIntervalMs: 120_000,
     }),
@@ -118,7 +147,15 @@ async function createClient(clientId) {
     },
   });
 
-  const state = makeState({ activeSession: clientId });
+  // Restore persisted label/phone/name so UI shows them during initializing
+  const meta  = await SessionMeta.findOne({ clientId }).lean();
+  const state = makeState({
+    status: 'initializing',
+    label:  meta?.label || clientId,
+    phone:  meta?.phone || null,
+    name:   meta?.name  || null,
+  });
+
   clients.set(clientId, { client, state });
   bindEvents(clientId);
   return { client, state };
@@ -128,9 +165,7 @@ async function destroyClient(clientId) {
   const entry = clients.get(clientId);
   if (!entry) return;
   try {
-    if (entry.state.status === 'connected') {
-      await saveSessionSafe(clientId, 'destroy');
-    }
+    if (entry.state.status === 'connected') await saveSessionSafe(clientId, 'destroy');
     await entry.client.logout().catch(() => {});
     await entry.client.destroy().catch(() => {});
   } catch {}
@@ -140,17 +175,20 @@ async function destroyClient(clientId) {
   }
 }
 
-// ─── events ─────────────────────────────────────────────────────────────────
+// ─── Event binding ────────────────────────────────────────────────────────────
 function bindEvents(clientId) {
   const entry = clients.get(clientId);
   if (!entry) return;
   const { client, state } = entry;
 
+  // Only broadcast if this is the session the frontend is watching
+  const emit = (event) => {
+    if (clientId === activeClientId) broadcast({ ...event, activeSession: clientId });
+  };
+
   const patch = (changes, event) => {
     Object.assign(state, changes);
-    if (clientId === activeClientId) {
-      broadcast({ ...event, activeSession: clientId });
-    }
+    emit(event);
   };
 
   client.on('qr', (qr) =>
@@ -166,86 +204,125 @@ function bindEvents(clientId) {
   );
 
   client.on('ready', async () => {
+    const info        = client.info;
+    const phone       = info?.wid?.user ?? null;
+    const name        = info?.pushname   ?? null;
     const connectedAt = new Date().toISOString();
-    // Grab phone/name from the client's own info if available
-    const info = client.info;
-    const phone = info?.wid?.user ?? null;
-    const name  = info?.pushname ?? null;
+    // Use WA name as label if we have no custom one yet
+    const label = state.label && state.label !== clientId ? state.label : (name || clientId);
+
     patch(
-      { status: 'connected', qr: null, connectedAt, phone, name },
-      { type: 'ready', connectedAt, phone, name }
+      { status: 'connected', qr: null, connectedAt, phone, name, label },
+      { type: 'ready', connectedAt, phone, name, label }
     );
+
+    // Persist to MongoDB so it survives restarts
+    await upsertMeta(clientId, { phone, name, label, connectedAt });
+
     await sleep(4000);
     await saveSessionSafe(clientId, 'ready');
   });
 
   client.on('disconnected', () => {
     patch(
-      { status: 'disconnected', qr: null, connectedAt: null, phone: null, name: null },
+      { status: 'disconnected', qr: null, connectedAt: null },
       { type: 'disconnected' }
     );
     clients.delete(clientId);
+    // Switch active to next available session
     if (activeClientId === clientId) {
       activeClientId = clients.size > 0 ? [...clients.keys()][0] : null;
-      // If another session is available, emit its state
-      if (activeClientId) {
-        broadcast({ type: 'state', ...frontendState() });
-      }
+      broadcast({ type: 'state', ...frontendState() });
     }
   });
 }
 
-// ─── SSE ────────────────────────────────────────────────────────────────────
+// ─── SSE ─────────────────────────────────────────────────────────────────────
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type',      'text/event-stream');
   res.setHeader('Cache-Control',     'no-cache');
   res.setHeader('Connection',        'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
-  // Send current state snapshot immediately
+  // Immediate snapshot so the frontend never waits for the first event
   res.write(`data: ${JSON.stringify({ type: 'state', ...frontendState() })}\n\n`);
   sseClients.push({ res });
   req.on('close', () => { sseClients = sseClients.filter((c) => c.res !== res); });
 });
 
 // ─── REST ────────────────────────────────────────────────────────────────────
+
+// GET /status — lightweight poll for page.tsx boot redirect
 app.get('/status', (_, res) => res.json(frontendState()));
 
 /**
  * GET /sessions
- * Returns all saved session docs from MongoDB.
- * wwebjs-mongo stores docs in the collection "whatsapp-RemoteAuth".
- * Doc shape: { _id, id: "RemoteAuth" | "RemoteAuth-{clientId}" }
+ * Returns ALL sessions: saved in MongoDB + currently running in memory.
+ * Shape: { clientId, sessionName, label, phone, name, status }
  */
 app.get('/sessions', async (_, res) => {
   try {
     const db   = mongoose.connection.db;
+    // wwebjs-mongo stores docs in the collection named by the MongoStore option
+    // (defaults to 'whatsapp-RemoteAuth').  Each doc has { id: sessionName }.
     const docs = await db
       .collection('whatsapp-RemoteAuth')
       .find({}, { projection: { _id: 0, id: 1 } })
       .toArray();
 
-    const sessions = docs.map((d) => {
-      const raw   = d.id ?? '';
-      const clientId = raw.replace(/^RemoteAuth-?/, '') || 'default';
-      const label    = clientId === 'default' ? 'Default' : clientId;
-      // Is this session currently active/connected?
-      const entry  = clients.get(raw) || clients.get(clientId);
+    // Load all metadata from our own collection for display names
+    const allMeta = await SessionMeta.find({}).lean();
+    const metaMap = Object.fromEntries(allMeta.map((m) => [m.clientId, m]));
+
+    const result = [];
+    const seen   = new Set();
+
+    // From MongoDB wwebjs docs
+    for (const doc of docs) {
+      const sessionName = doc.id ?? '';
+      // sessionName = "RemoteAuth" | "RemoteAuth-work"
+      const clientId = sessionName === 'RemoteAuth'
+        ? 'RemoteAuth'
+        : sessionName.replace(/^RemoteAuth-/, '');
+
+      if (seen.has(clientId)) continue;
+      seen.add(clientId);
+
+      const meta   = metaMap[clientId];
+      const entry  = clients.get(clientId);
       const status = entry?.state?.status ?? 'saved';
-      return { id: raw, clientId, label, status };
-    });
-    // Also include in-memory clients that may not yet be saved
-    for (const [cid, entry] of clients.entries()) {
-      if (!sessions.find((s) => s.id === cid || s.clientId === cid)) {
-        sessions.push({ id: cid, clientId: cid, label: cid, status: entry.state.status });
-      }
+
+      result.push({
+        clientId,
+        sessionName,
+        label:  entry?.state?.label || meta?.label || clientId,
+        phone:  entry?.state?.phone || meta?.phone || null,
+        name:   entry?.state?.name  || meta?.name  || null,
+        status,
+      });
     }
-    res.json(sessions);
+
+    // Add in-memory clients not yet saved (brand-new sessions still scanning QR)
+    for (const [cid, entry] of clients.entries()) {
+      if (seen.has(cid)) continue;
+      const meta = metaMap[cid];
+      result.push({
+        clientId:    cid,
+        sessionName: cid === 'RemoteAuth' ? 'RemoteAuth' : `RemoteAuth-${cid}`,
+        label:  entry.state.label || meta?.label || cid,
+        phone:  entry.state.phone || meta?.phone || null,
+        name:   entry.state.name  || meta?.name  || null,
+        status: entry.state.status,
+      });
+    }
+
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+// GET /session-exists — quick boot check (does the default session exist?)
 app.get('/session-exists', async (_, res) => {
   try {
     const s      = new MongoStore({ mongoose });
@@ -258,83 +335,97 @@ app.get('/session-exists', async (_, res) => {
 
 /**
  * POST /connect
- * Body: { sessionId?: string }  — raw doc id e.g. "RemoteAuth-work" or undefined for new QR
- * Behaviour:
- *   1. If sessionId provided → restore existing session, skip QR
- *   2. If sessionId omitted  → new QR session (clientId = uuid-ish timestamp)
- *   3. If target session already connected → just switch active, return immediately
+ * Body: { sessionId?: string, label?: string }
+ *   sessionId = clientId from GET /sessions (e.g. "RemoteAuth" | "work")
+ *   label     = custom display name for new sessions
+ *
+ * Lifecycle:
+ *   1. sessionId given + already connected  → switch active, return immediately
+ *   2. sessionId given + in progress        → switch active, return current status
+ *   3. sessionId given + saved in Mongo     → restore session, go to /session
+ *   4. no sessionId                         → new QR session, go to /qr
  */
 app.post('/connect', async (req, res) => {
-  const rawId    = req.body?.sessionId;
-  // Derive simple clientId from raw doc id
-  const clientId = rawId
-    ? (rawId.replace(/^RemoteAuth-?/, '') || 'default')
-    : `session-${Date.now()}`;
+  const { sessionId, label } = req.body ?? {};
 
-  // Already connected for this clientId → switch active and return
-  const existing = clients.get(clientId) || clients.get(rawId);
-  if (existing?.state?.status === 'connected') {
+  // Determine clientId — default session always uses 'RemoteAuth' as the key
+  const clientId = sessionId || `session-${Date.now()}`;
+
+  // Case 1 & 2: already in memory
+  const existing = clients.get(clientId);
+  if (existing) {
     activeClientId = clientId;
-    broadcast({ type: 'state', ...frontendState() });
-    return res.json({ ok: true, status: 'connected', activeSession: clientId });
+    const s = existing.state.status;
+    if (s === 'connected') {
+      broadcast({ type: 'state', ...frontendState() });
+      return res.json({ ok: true, status: 'connected', activeSession: clientId });
+    }
+    if (['initializing', 'qr', 'authenticated'].includes(s)) {
+      return res.json({ ok: true, status: s, activeSession: clientId });
+    }
   }
 
-  // If client exists but isn't connected yet → return its current status
-  if (existing && ['initializing', 'qr', 'authenticated'].includes(existing.state.status)) {
-    activeClientId = clientId;
-    return res.json({ ok: true, status: existing.state.status, activeSession: clientId });
-  }
-
+  // Case 3 & 4: create (or recreate) client
   await createClient(clientId);
+  if (label) {
+    clients.get(clientId).state.label = label;
+    await upsertMeta(clientId, { label });
+  }
   clearBrowserLock(clientId);
   activeClientId = clientId;
-  clients.get(clientId).state.status = 'initializing';
+
+  // Fire and forget — events arrive via SSE
   clients.get(clientId).client.initialize();
-  res.json({ ok: true, status: 'initializing', activeSession: clientId });
+
+  const isRestore = !!sessionId;
+  res.json({ ok: true, status: 'initializing', activeSession: clientId, isRestore });
 });
 
 /**
  * POST /switch
- * Body: { sessionId: string }  — switch active session without destroying others
+ * Switch active session to an already-running one.
  */
 app.post('/switch', (req, res) => {
-  const rawId    = req.body?.sessionId;
-  const clientId = rawId?.replace(/^RemoteAuth-?/, '') || rawId;
-  const entry    = clients.get(clientId);
-  if (!entry) return res.status(404).json({ error: 'Session not found or not running' });
-  activeClientId = clientId;
+  const { sessionId } = req.body ?? {};
+  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+  const entry = clients.get(sessionId);
+  if (!entry) return res.status(404).json({ error: 'Session not loaded' });
+  activeClientId = sessionId;
   broadcast({ type: 'state', ...frontendState() });
   res.json({ ok: true, ...frontendState() });
 });
 
 /**
  * POST /logout
- * Body: { sessionId?: string }  — logout specific session or active one
+ * Body: { sessionId?: string } — logout target or active session.
+ * Deletes wwebjs session from MongoDB and our metadata.
  */
 app.post('/logout', async (req, res) => {
-  const rawId    = req.body?.sessionId;
-  const clientId = rawId
-    ? (rawId.replace(/^RemoteAuth-?/, '') || 'default')
-    : activeClientId;
-
+  const clientId = req.body?.sessionId || activeClientId;
   if (!clientId) return res.json({ ok: true });
+
   await destroyClient(clientId);
-  broadcast({ type: 'disconnected', activeSession: activeClientId });
-  // Send updated state so frontend knows which session is now active
+
+  // Remove from wwebjs-mongo collection
+  try {
+    const s           = new MongoStore({ mongoose });
+    const sessionName = clientId === 'RemoteAuth' ? 'RemoteAuth' : `RemoteAuth-${clientId}`;
+    await s.delete({ session: sessionName }).catch(() => {});
+    await SessionMeta.deleteOne({ clientId }).catch(() => {});
+  } catch {}
+
   broadcast({ type: 'state', ...frontendState() });
   res.json({ ok: true });
 });
 
-/**
- * GET /chats — for active session
- */
+// GET /chats
 app.get('/chats', async (_, res) => {
   const entry = getActive();
   if (!entry || entry.state.status !== 'connected')
     return res.status(503).json({ error: 'Not connected' });
   try {
-    const chats   = await entry.client.getChats();
-    const payload = chats.slice(0, 30).map((c) => ({
+    const chats = await entry.client.getChats();
+    res.json(chats.slice(0, 30).map((c) => ({
       id:          c.id._serialized,
       name:        c.name,
       isGroup:     c.isGroup,
@@ -344,14 +435,11 @@ app.get('/chats', async (_, res) => {
         ? { body: c.lastMessage.body?.slice(0, 60) ?? '', fromMe: c.lastMessage.fromMe,
             timestamp: c.lastMessage.timestamp, hasMedia: c.lastMessage.hasMedia }
         : null,
-    }));
-    res.json(payload);
+    })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/**
- * GET /chats/:id/messages
- */
+// GET /chats/:id/messages
 app.get('/chats/:id/messages', async (req, res) => {
   const entry = getActive();
   if (!entry || entry.state.status !== 'connected')
@@ -360,17 +448,14 @@ app.get('/chats/:id/messages', async (req, res) => {
   try {
     const chat    = await entry.client.getChatById(req.params.id);
     const msgs    = await chat.fetchMessages({ limit });
-    const payload = msgs.map((m) => ({
+    res.json(msgs.map((m) => ({
       id: m.id._serialized, body: m.body, fromMe: m.fromMe,
       author: m.author ?? null, timestamp: m.timestamp, hasMedia: m.hasMedia, type: m.type,
-    }));
-    res.json(payload);
+    })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/**
- * POST /send — for active session
- */
+// POST /send
 app.post('/send', async (req, res) => {
   const entry = getActive();
   if (!entry || entry.state.status !== 'connected')
@@ -391,16 +476,48 @@ app.post('/send', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── boot ────────────────────────────────────────────────────────────────────
-mongoose.connect(MONGO_URI)
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+// On startup: restore ALL saved sessions automatically.
+async function autoRestoreSessions() {
+  const db   = mongoose.connection.db;
+  let   docs = [];
+  try {
+    docs = await db
+      .collection('whatsapp-RemoteAuth')
+      .find({}, { projection: { _id: 0, id: 1 } })
+      .toArray();
+  } catch {
+    console.log('Bot → No sessions in MongoDB yet.');
+  }
+
+  if (docs.length === 0) {
+    console.log('Bot → No saved sessions. Waiting for first connect.');
+    return;
+  }
+
+  console.log(`Bot → Restoring ${docs.length} saved session(s)…`);
+  for (const doc of docs) {
+    const sessionName = doc.id ?? '';
+    const clientId = sessionName === 'RemoteAuth'
+      ? 'RemoteAuth'
+      : sessionName.replace(/^RemoteAuth-/, '');
+
+    console.log(`Bot → Restoring [${clientId}]…`);
+    await createClient(clientId);
+    clearBrowserLock(clientId);
+    if (!activeClientId) activeClientId = clientId;
+    clients.get(clientId).client.initialize();
+
+    // Stagger initializations to avoid Puppeteer resource contention
+    if (docs.length > 1) await sleep(3000);
+  }
+}
+
+mongoose
+  .connect(MONGO_URI)
   .then(async () => {
     console.log('Bot → Connected to MongoDB');
-    // Auto-start the default session on boot (existing behaviour preserved)
-    await createClient('RemoteAuth');
-    clearBrowserLock('RemoteAuth');
-    activeClientId = 'RemoteAuth';
-    clients.get('RemoteAuth').state.status = 'initializing';
-    clients.get('RemoteAuth').client.initialize();
+    await autoRestoreSessions();
     app.listen(3001, () => console.log('Bot → http://localhost:3001'));
   })
   .catch((err) => {
