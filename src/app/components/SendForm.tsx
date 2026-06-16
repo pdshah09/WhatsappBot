@@ -78,10 +78,19 @@ export default function SendForm() {
         </label>
         <input
           type="tel"
+          maxLength={10}
+          onInput={
+              (e) => {
+                  e.currentTarget.value = e.currentTarget.value
+                      .replace(/\D/g, '')
+                      .slice(0, 10);
+              }
+          }
           value={phone}
           onChange={(e) => setPhone(e.target.value.replace(/[^\d+\-\s()]/g, ""))}
           placeholder="919876543210"
           className="bg-[#1a1a1a] border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-[#25d366]/50 placeholder:text-white/20"
+          required
         />
       </div>
 
