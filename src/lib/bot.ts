@@ -65,7 +65,7 @@ export async function botSend(
 
 /** Fetch chats — 2-minute timeout (getChats can be slow on large accounts). */
 export function botGetChats(): Promise<BotChat[]> {
-  return request('/chats', {}, 120_000);
+  return request('/chats', {}, 300_000);
 }
 
 export function botGetMessages(chatId: string, limit = 20): Promise<BotMessage[]> {
