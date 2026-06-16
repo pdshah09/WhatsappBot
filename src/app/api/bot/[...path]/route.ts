@@ -3,11 +3,16 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BOT = process.env.BOT_URL ?? "http://localhost:3001";
 
-export async function GET(req: NextRequest, { params }: { params: { path: string[] } }) {
-  return proxy(params.path, "GET");
+type Context = { params: Promise<{ path: string[] }> };
+
+export async function GET(_req: NextRequest, { params }: Context) {
+  const { path } = await params;
+  return proxy(path, "GET");
 }
-export async function POST(req: NextRequest, { params }: { params: { path: string[] } }) {
-  return proxy(params.path, "POST", await req.text());
+
+export async function POST(req: NextRequest, { params }: Context) {
+  const { path } = await params;
+  return proxy(path, "POST", await req.text());
 }
 
 async function proxy(segments: string[], method: string, body?: string) {
