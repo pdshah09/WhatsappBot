@@ -73,6 +73,24 @@ export function botMediaUrl(msgId: string): string {
   return `${BASE}/media/${encodeURIComponent(msgId)}`;
 }
 
+/**
+ * Derive the phone number to pass to botSend.
+ *
+ * Priority order:
+ *  1. chat.phone  — plain number already provided by the bot server (preferred)
+ *  2. Strip the @-suffix from chat.id (e.g. 919876543210@c.us → "919876543210")
+ *
+ * Group chats: always return the full chat.id unchanged — the server routes
+ * by chatId for groups, not a phone number.
+ */
+export function chatRecipient(chat: BotChat): string {
+  if (chat.isGroup) return chat.id;
+  // Prefer the explicit phone field if the server populated it
+  if (chat.phone) return chat.phone;
+  // Fallback: strip JID suffix (@c.us, @lid, @s.whatsapp.net, …)
+  return chat.id.split('@')[0];
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface BotSession {
   clientId:    string;
@@ -97,6 +115,9 @@ export interface BotChat {
   isGroup:       boolean;
   unreadCount:   number;
   timestamp:     number;
+  /** Plain phone number returned by the bot server (e.g. "919876543210").
+   *  Preferred over parsing the JID. Null when the server doesn't send it. */
+  phone:         string | null;
   profilePicUrl: string | null;
   lastMessage: {
     body: string; fromMe: boolean; timestamp: number; hasMedia: boolean;
