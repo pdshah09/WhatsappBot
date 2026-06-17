@@ -183,8 +183,10 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
     return () => document.removeEventListener('mousedown', h);
   }, [onClose]);
   return (
+
     <div ref={ref}
-      className="absolute bottom-full mb-2 left-0 z-50 bg-[#1a1a1a] border border-white/10 rounded-2xl p-2 shadow-2xl w-[232px]">
+      // Changed "left-0" to "right-0" below so it anchors to the right and prevents overflow
+      className="absolute bottom-full mb-2 right-0 z-50 bg-[#1a1a1a] border border-white/10 rounded-2xl p-2 shadow-2xl w-[232px]">
       <div className="grid grid-cols-8 gap-0.5 wa-scroll overflow-y-auto max-h-[160px]">
         {EMOJIS.map(em => (
           <button key={em} onClick={() => { onPick(em); onClose(); }}
@@ -194,6 +196,7 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
         ))}
       </div>
     </div>
+
   );
 }
 
