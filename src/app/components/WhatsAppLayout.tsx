@@ -230,7 +230,7 @@ const EMOJIS = [
   '😀','😂','�','😍','🤔','😅','😭','😡','🩺','🤣',
   '👍','👎','❤️','🔥','🎉','✅','⭐','💯','🙏','👏',
   '😊','🤗','😎','🥳','😴','🤝','💪','🫶','🫡','😇',
-  '�','😏','😬','🤐','🤢','😤','😩','😓','🙄','😒',
+  '😏','😬','🤐','🤢','😤','😩','😓','🙄','😒',
 ];
 function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -241,7 +241,7 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
   }, [onClose]);
   return (
     <div ref={ref}
-      className="absolute bottom-full mb-2 left-0 z-50 bg-[#1a1a1a] border border-white/10 rounded-2xl p-2 shadow-2xl w-[232px]">
+      className="absolute bottom-full mb-2 right-0 z-50 bg-[#1a1a1a] border border-white/10 rounded-2xl p-2 shadow-2xl w-[232px]">
       <div className="grid grid-cols-8 gap-0.5 wa-scroll overflow-y-auto max-h-[160px]">
         {EMOJIS.map(em => (
           <button key={em} onClick={() => { onPick(em); onClose(); }}
@@ -753,9 +753,10 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
                 <Avatar name={selected.name} isGroup={selected.isGroup} pic={selected.profilePicUrl} size={10} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white/90 truncate">{selected.name}</p>
-                  <p className="text-[10px] text-white/30">
+                  {/* <p className="text-[10px] text-white/30">
                     {selected.isGroup ? 'Group' : `+${chatRecipient(selected)}`}
-                  </p>
+                  </p> */}
+                  <p className="text-[10px] text-white/30">{selected.isGroup ? 'Group' : 'Contact'}</p>
                 </div>
                 <button onClick={() => openChat(selected)} title="Refresh"
                   className="text-white/25 hover:text-white transition">
