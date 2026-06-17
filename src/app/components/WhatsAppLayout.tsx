@@ -4,10 +4,11 @@ import { JSX, useCallback, useEffect, useRef, useState } from 'react';
 import {
   botGetChats, botGetMessages, botSend, botMediaUrl,
   botSwitch, botConnect, botLogout, botGetSessions,
+  chatRecipient,
   type BotChat, type BotMessage, type BotSession, type BotState,
 } from '@/lib/bot';
 
-// ─── Themed scrollbar (injected once) ────────────────────────────────────────
+// ─── Themed scrollbar (injected once) ────────────────────────────────────────────
 const SCROLLBAR_CSS = `
   .wa-scroll::-webkit-scrollbar{width:4px;height:4px}
   .wa-scroll::-webkit-scrollbar-track{background:transparent}
@@ -16,7 +17,7 @@ const SCROLLBAR_CSS = `
   .wa-scroll{scrollbar-width:thin;scrollbar-color:#25d36640 transparent}
 `;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────────
 function fmtTime(ts: number) {
   const d = new Date(ts * 1000), now = new Date();
   const sameDay = d.toDateString() === now.toDateString();
@@ -34,21 +35,7 @@ const isImg  = (u: string) => /\.(jpe?g|png|gif|webp|bmp|svg)(\?|$)/i.test(u);
 const isVid  = (u: string) => /\.(mp4|webm|ogg|mov)(\?|$)/i.test(u);
 const isAud  = (u: string) => /\.(mp3|ogg|wav|m4a|aac)(\?|$)/i.test(u);
 
-/**
- * Derive the recipient identifier to pass to botSend.
- * - Individual chats: JID may be 919876543210@c.us, 919876543210@lid,
- *   or any future @suffix → strip everything after @ to get the plain number.
- * - Group chats: JID is like 120363xxxxx@g.us → pass the full JID unchanged;
- *   the server routes by chatId for groups.
- */
-function chatRecipient(chat: BotChat): string {
-  if (!chat.isGroup) {
-    return chat.id.split('@')[0]; // strips @c.us, @lid, @s.whatsapp.net, etc.
-  }
-  return chat.id; // group JIDs pass through unchanged
-}
-
-// ─── Avatar ───────────────────────────────────────────────────────────────────
+// ─── Avatar ───────────────────────────────────────────────────────────────────────────
 function Avatar({ name, isGroup = false, pic, size = 10 }:
   { name: string; isGroup?: boolean; pic?: string | null; size?: number }) {
   const [err, setErr] = useState(false);
@@ -65,7 +52,7 @@ function Avatar({ name, isGroup = false, pic, size = 10 }:
   );
 }
 
-// ─── Uptime ───────────────────────────────────────────────────────────────────
+// ─── Uptime ───────────────────────────────────────────────────────────────────────────
 function Uptime({ since }: { since: string }) {
   const [lbl, setLbl] = useState('');
   useEffect(() => {
@@ -82,7 +69,7 @@ function Uptime({ since }: { since: string }) {
   return <span className="tabular-nums">{lbl}</span>;
 }
 
-// ─── Link preview ─────────────────────────────────────────────────────────────
+// ─── Link preview ───────────────────────────────────────────────────────────────────
 function LinkPreview({ url }: { url: string }) {
   const domain = (() => { try { return new URL(url).hostname.replace('www.',''); } catch { return url; } })();
   const ytId   = /youtu\.?be/.test(url)
@@ -108,7 +95,7 @@ function LinkPreview({ url }: { url: string }) {
   );
 }
 
-// ─── MediaBubble ──────────────────────────────────────────────────────────────
+// ─── MediaBubble ───────────────────────────────────────────────────────────────────────
 function MediaBubble({ msg }: { msg: BotMessage }) {
   const mediaUrl = msg.mediaUrl ?? (msg.hasMedia ? botMediaUrl(msg.id) : null);
   const fname    = msg.filename ?? msg.body ?? 'file';
@@ -205,7 +192,7 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
   );
 }
 
-// ─── Small icon components ────────────────────────────────────────────────────
+// ─── Small icon components ────────────────────────────────────────────────────────────────
 function DownloadIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
@@ -238,12 +225,12 @@ function MediaPlaceholder({ icon, label }: { icon: string; label: string }) {
   );
 }
 
-// ─── Emoji picker ─────────────────────────────────────────────────────────────
+// ─── Emoji picker ────────────────────────────────────────────────────────────────────────
 const EMOJIS = [
-  '😀','😂','🤩','😍','🤔','😅','😭','😡','🥺','🤣',
+  '😀','😂','�','😍','🤔','😅','😭','😡','🩺','🤣',
   '👍','👎','❤️','🔥','🎉','✅','⭐','💯','🙏','👏',
   '😊','🤗','😎','🥳','😴','🤝','💪','🫶','🫡','😇',
-  '🤩','😏','😬','🤐','🤢','😤','😩','😓','🙄','😒',
+  '�','😏','😬','🤐','🤢','😤','😩','😓','🙄','😒',
 ];
 function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -267,7 +254,7 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
   );
 }
 
-// ─── Session dropdown ─────────────────────────────────────────────────────────
+// ─── Session dropdown ────────────────────────────────────────────────────────────────────
 const STATUS_DOT: Record<string, string> = {
   connected: 'bg-[#25d366]', initializing: 'bg-amber-400', qr: 'bg-amber-400',
   authenticated: 'bg-amber-400', saved: 'bg-white/20', disconnected: 'bg-white/10',
@@ -354,7 +341,7 @@ function SessionDropdown({
   );
 }
 
-// ─── New Message modal ────────────────────────────────────────────────────────
+// ─── New Message modal ────────────────────────────────────────────────────────────────────
 function NewMessageModal({ onClose }: { onClose: () => void }) {
   const [phone,   setPhone]   = useState('');
   const [msg,     setMsg]     = useState('');
@@ -463,7 +450,7 @@ function NewMessageModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ─── ComposeBar ───────────────────────────────────────────────────────────────
+// ─── ComposeBar ──────────────────────────────────────────────────────────────────────────
 function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Promise<void> }) {
   const [text,      setText]      = useState('');
   const [file,      setFile]      = useState<File|null>(null);
@@ -558,7 +545,7 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
   );
 }
 
-// ─── Main layout ──────────────────────────────────────────────────────────────
+// ─── Main layout ───────────────────────────────────────────────────────────────────────────
 interface Props {
   botState:        BotState;
   sessionsVersion: number;
@@ -606,9 +593,10 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
   }, [messages, msgsLoading]);
 
   // ── In-thread send
-  // chatRecipient() strips everything after '@' for individual chats so the
-  // bot server receives a plain phone number regardless of JID suffix type
-  // (@c.us, @lid, @s.whatsapp.net, etc.). Group JIDs pass through unchanged.
+  // chatRecipient() (imported from bot.ts) resolves the phone number:
+  //   • Prefers chat.phone if the server populated it (plain number, no suffix)
+  //   • Falls back to stripping the @-suffix from chat.id
+  //   • Group chats: passes the full chat.id unchanged
   const handleSendInThread = useCallback(async (text: string, file: File|null) => {
     if (!selected) return;
     const recipient = chatRecipient(selected);
@@ -637,7 +625,7 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
       <style dangerouslySetInnerHTML={{ __html: SCROLLBAR_CSS }} />
       <div className="flex h-screen bg-[#111] text-white overflow-hidden">
 
-        {/* ── LEFT SIDEBAR ───────────────────────── */}
+        {/* ── LEFT SIDEBAR ────────────────────────────────────────── */}
         <aside className="w-[340px] flex-shrink-0 flex flex-col border-r border-white/8 bg-[#111]">
 
           {/* Session header */}
@@ -750,7 +738,7 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
           </div>
         </aside>
 
-        {/* ── RIGHT MAIN ────────────────────────── */}
+        {/* ── RIGHT MAIN ────────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0 bg-[#0d0d0d]">
           {selected ? (
             <>
