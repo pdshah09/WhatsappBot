@@ -34,6 +34,19 @@ const isImg  = (u: string) => /\.(jpe?g|png|gif|webp|bmp|svg)(\?|$)/i.test(u);
 const isVid  = (u: string) => /\.(mp4|webm|ogg|mov)(\?|$)/i.test(u);
 const isAud  = (u: string) => /\.(mp3|ogg|wav|m4a|aac)(\?|$)/i.test(u);
 
+/**
+ * Derive the recipient identifier to pass to botSend.
+ * - Individual chats: JID is like 919876543210@c.us  → use the number part only
+ * - Group chats:      JID is like 120363xxxxx@g.us   → pass the full JID; server
+ *   routes by chatId for groups
+ */
+function chatRecipient(chat: BotChat): string {
+  if (!chat.isGroup && chat.id.endsWith('@c.us')) {
+    return chat.id.split('@')[0];   // plain phone number e.g. "919876543210"
+  }
+  return chat.id;                   // full JID for groups / unknown types
+}
+
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 function Avatar({ name, isGroup = false, pic, size = 10 }:
   { name: string; isGroup?: boolean; pic?: string | null; size?: number }) {
@@ -95,9 +108,7 @@ function LinkPreview({ url }: { url: string }) {
 }
 
 // ─── MediaBubble ──────────────────────────────────────────────────────────────
-// Resolves the best viewable/downloadable URL for every media type.
 function MediaBubble({ msg }: { msg: BotMessage }) {
-  // Best media URL: field from server > proxied endpoint
   const mediaUrl = msg.mediaUrl ?? (msg.hasMedia ? botMediaUrl(msg.id) : null);
   const fname    = msg.filename ?? msg.body ?? 'file';
   const mime     = msg.mimetype ?? '';
@@ -106,7 +117,6 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
   const urls     = extractUrls(msg.body ?? '');
   const textBody = (msg.body ?? '').trim();
 
-  // Determine render mode
   const isImage    = t === 'image' || t === 'sticker'
     || mime.startsWith('image/')
     || (!mime && urls.some(isImg));
@@ -117,9 +127,8 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
     || mime.startsWith('audio/')
     || (!mime && urls.some(isAud));
   const isDocument = t === 'document'
-    || (mime && !isImage && !isVideo && !isAudio);
+    || (!!mime && !isImage && !isVideo && !isAudio);
 
-  // For chat messages with inline URLs, derive typed urls
   const imgUrl = isImage  ? (mediaUrl ?? urls.find(isImg) ?? null) : null;
   const vidUrl = isVideo  ? (mediaUrl ?? urls.find(isVid) ?? null) : null;
   const audUrl = isAudio  ? (mediaUrl ?? urls.find(isAud) ?? null) : null;
@@ -130,11 +139,10 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
   const showText = textBody
     && !(isImage && textBody === imgUrl)
     && !(isVideo && textBody === vidUrl)
-    && !(isDocument);
+    && !isDocument;
 
   return (
     <div className="flex flex-col gap-1.5">
-      {/* ── Image ── */}
       {isImage && (
         imgUrl
           ? <div className="group relative">
@@ -148,7 +156,6 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
             </div>
           : <MediaPlaceholder icon="image" label="Image" />
       )}
-      {/* ── Video ── */}
       {isVideo && (
         vidUrl
           ? <div className="relative">
@@ -160,7 +167,6 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
             </div>
           : <MediaPlaceholder icon="video" label="Video" />
       )}
-      {/* ── Audio / PTT ── */}
       {isAudio && (
         audUrl
           ? <div className="flex items-center gap-2 bg-black/20 rounded-2xl px-3 py-2 max-w-[260px]">
@@ -173,7 +179,6 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
             </div>
           : <MediaPlaceholder icon="mic" label={t === 'ptt' ? 'Voice note' : 'Audio'} />
       )}
-      {/* ── Document / File ── */}
       {isDocument && (
         <div className="flex items-center gap-2.5 bg-[#1c3a2a] border border-[#25d366]/20 rounded-xl px-3 py-2.5 max-w-[240px]">
           <div className="w-9 h-9 rounded-lg bg-[#25d366]/20 flex items-center justify-center flex-shrink-0">
@@ -193,9 +198,7 @@ function MediaBubble({ msg }: { msg: BotMessage }) {
           )}
         </div>
       )}
-      {/* ── Plain text ── */}
       {showText && <p className="whitespace-pre-wrap break-words text-sm">{textBody}</p>}
-      {/* ── Link previews ── */}
       {linkUrls.map(u => <LinkPreview key={u} url={u} />)}
     </div>
   );
@@ -460,16 +463,14 @@ function NewMessageModal({ onClose }: { onClose: () => void }) {
 }
 
 // ─── ComposeBar ───────────────────────────────────────────────────────────────
-// Isolated component so its local state never conflicts with the parent.
 function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Promise<void> }) {
   const [text,      setText]      = useState('');
   const [file,      setFile]      = useState<File|null>(null);
   const [sending,   setSending]   = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const fileRef    = useRef<HTMLInputElement>(null);
-  const textareaRef= useRef<HTMLTextAreaElement>(null);
+  const fileRef     = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize textarea
   const resize = () => {
     const el = textareaRef.current;
     if (!el) return;
@@ -486,8 +487,7 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
       setText('');
       setFile(null);
       if (fileRef.current) fileRef.current.value = '';
-      // reset height
-      if (textareaRef.current) { textareaRef.current.style.height = 'auto'; }
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
     } finally {
       setSending(false);
     }
@@ -499,8 +499,7 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
 
   return (
     <div className="border-t border-white/8 bg-[#111] px-3 py-2.5 flex items-end gap-2">
-      {/* Attach */}
-      <button onClick={() => composeFileRef(fileRef)} title="Attach file"
+      <button onClick={() => fileRef.current?.click()} title="Attach file"
         className="w-8 h-8 flex items-center justify-center rounded-full text-white/30 hover:text-white hover:bg-white/8 transition flex-shrink-0">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -508,7 +507,6 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
       </button>
       <input ref={fileRef} type="file" className="hidden" onChange={e => setFile(e.target.files?.[0] ?? null)} />
 
-      {/* Input area */}
       <div className="flex-1 flex flex-col min-w-0">
         {file && (
           <div className="flex items-center gap-2 mb-1.5 bg-white/5 rounded-lg px-2.5 py-1">
@@ -528,7 +526,6 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
             className="flex-1 bg-transparent text-sm text-white/80 placeholder:text-white/25 resize-none focus:outline-none max-h-32 overflow-y-auto wa-scroll leading-relaxed pr-7"
             style={{ minHeight: '24px' }}
           />
-          {/* Emoji */}
           <div className="absolute right-0 bottom-0">
             {emojiOpen && (
               <EmojiPicker
@@ -544,7 +541,6 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
         </div>
       </div>
 
-      {/* Send */}
       <button
         onClick={handleSend}
         disabled={sending || !text.trim()}
@@ -560,8 +556,6 @@ function ComposeBar({ onSend }: { onSend: (text: string, file: File|null) => Pro
     </div>
   );
 }
-// tiny helper so TS doesn't complain about calling a ref as function
-function composeFileRef(ref: React.RefObject<HTMLInputElement|null>) { ref.current?.click(); }
 
 // ─── Main layout ──────────────────────────────────────────────────────────────
 interface Props {
@@ -610,11 +604,13 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
     if (!msgsLoading) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, msgsLoading]);
 
-  // ── In-thread send (passed to ComposeBar)
+  // ── In-thread send
+  // For individual chats (@c.us) pass the plain phone number.
+  // For group chats (@g.us) pass the full JID — server routes by chatId.
   const handleSendInThread = useCallback(async (text: string, file: File|null) => {
     if (!selected) return;
-    const phone = selected.id.split('@')[0];
-    await botSend(phone, text, file ?? undefined);
+    const recipient = chatRecipient(selected);
+    await botSend(recipient, text, file ?? undefined);
     setMessages(prev => [...prev, {
       id:        `local-${Date.now()}`,
       body:      text,
@@ -767,7 +763,9 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
                 <Avatar name={selected.name} isGroup={selected.isGroup} pic={selected.profilePicUrl} size={10} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white/90 truncate">{selected.name}</p>
-                  <p className="text-[10px] text-white/30">{selected.isGroup ? 'Group' : 'Contact'}</p>
+                  <p className="text-[10px] text-white/30">
+                    {selected.isGroup ? 'Group' : `+${selected.id.split('@')[0]}`}
+                  </p>
                 </div>
                 <button onClick={() => openChat(selected)} title="Refresh"
                   className="text-white/25 hover:text-white transition">
@@ -814,7 +812,6 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
                 <div ref={bottomRef} />
               </div>
 
-              {/* Compose bar — isolated component fixes send-disabled bug */}
               <ComposeBar onSend={handleSendInThread} />
             </>
           ) : (
