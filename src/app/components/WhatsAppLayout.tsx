@@ -1,6 +1,6 @@
 // src/app/components/WhatsAppLayout.tsx
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { JSX, useCallback, useEffect, useRef, useState } from 'react';
 import {
   botGetChats, botGetMessages, botSend, botMediaUrl,
   botSwitch, botConnect, botLogout, botGetSessions,
