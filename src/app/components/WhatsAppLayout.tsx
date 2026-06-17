@@ -36,15 +36,16 @@ const isAud  = (u: string) => /\.(mp3|ogg|wav|m4a|aac)(\?|$)/i.test(u);
 
 /**
  * Derive the recipient identifier to pass to botSend.
- * - Individual chats: JID is like 919876543210@c.us  → use the number part only
- * - Group chats:      JID is like 120363xxxxx@g.us   → pass the full JID; server
- *   routes by chatId for groups
+ * - Individual chats: JID may be 919876543210@c.us, 919876543210@lid,
+ *   or any future @suffix → strip everything after @ to get the plain number.
+ * - Group chats: JID is like 120363xxxxx@g.us → pass the full JID unchanged;
+ *   the server routes by chatId for groups.
  */
 function chatRecipient(chat: BotChat): string {
-  if (!chat.isGroup && chat.id.endsWith('@c.us')) {
-    return chat.id.split('@')[0];   // plain phone number e.g. "919876543210"
+  if (!chat.isGroup) {
+    return chat.id.split('@')[0]; // strips @c.us, @lid, @s.whatsapp.net, etc.
   }
-  return chat.id;                   // full JID for groups / unknown types
+  return chat.id; // group JIDs pass through unchanged
 }
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
@@ -605,9 +606,9 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
   }, [messages, msgsLoading]);
 
   // ── In-thread send
-  // chatRecipient() strips "@c.us" for individual chats so the bot server
-  // receives a plain phone number (e.g. "919876543210") and can resolve it
-  // on WhatsApp. Group JIDs are passed through unchanged.
+  // chatRecipient() strips everything after '@' for individual chats so the
+  // bot server receives a plain phone number regardless of JID suffix type
+  // (@c.us, @lid, @s.whatsapp.net, etc.). Group JIDs pass through unchanged.
   const handleSendInThread = useCallback(async (text: string, file: File|null) => {
     if (!selected) return;
     const recipient = chatRecipient(selected);
