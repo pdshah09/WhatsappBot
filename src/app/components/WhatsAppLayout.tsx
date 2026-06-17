@@ -605,8 +605,9 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
   }, [messages, msgsLoading]);
 
   // ── In-thread send
-  // For individual chats (@c.us) pass the plain phone number.
-  // For group chats (@g.us) pass the full JID — server routes by chatId.
+  // chatRecipient() strips "@c.us" for individual chats so the bot server
+  // receives a plain phone number (e.g. "919876543210") and can resolve it
+  // on WhatsApp. Group JIDs are passed through unchanged.
   const handleSendInThread = useCallback(async (text: string, file: File|null) => {
     if (!selected) return;
     const recipient = chatRecipient(selected);
@@ -764,7 +765,7 @@ export default function WhatsAppLayout({ botState, sessionsVersion, onLogout, on
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white/90 truncate">{selected.name}</p>
                   <p className="text-[10px] text-white/30">
-                    {selected.isGroup ? 'Group' : `+${selected.id.split('@')[0]}`}
+                    {selected.isGroup ? 'Group' : `+${chatRecipient(selected)}`}
                   </p>
                 </div>
                 <button onClick={() => openChat(selected)} title="Refresh"
